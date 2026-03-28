@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Coding agent powered by Nvidia API (Kimi K2.5 model) with tool use."""
 
+import argparse
 import json
 import os
 import sys
@@ -202,12 +203,24 @@ def agent_loop(user_input, conversation_history, api_key):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Coding agent powered by Nvidia API (Kimi K2.5)")
+    parser.add_argument("--serve", action="store_true", help="Start Telegram bot webhook server")
+    args = parser.parse_args()
+
     api_key = get_api_key()
     conversation_history = []
 
     # Initialize Docker sandbox
     docker = DockerManager(work_dir=os.getcwd())
     set_docker_manager(docker)
+
+    if args.serve:
+        from telegram_bot import run_telegram_bot
+        try:
+            run_telegram_bot(api_key, docker)
+        finally:
+            docker.cleanup()
+        return
 
     print("Nvidia Coding Agent (Kimi K2.5)", file=sys.stderr)
     print("Tools: read_file, write_file, patch_file, grep_file, ls_file, execute_command, rebuild_container, web", file=sys.stderr)
