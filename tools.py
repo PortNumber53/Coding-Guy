@@ -85,7 +85,7 @@ def web(url: str, method: str = "GET", headers: dict | None = None,
     """Make an HTTP request and return the response."""
     method = method.upper()
     try:
-        kwargs = {"headers": headers or {}, "timeout": 30}
+        kwargs = {"headers": headers or {}, "timeout": 60}
         if body and method in ("POST", "PUT", "PATCH"):
             kwargs["data"] = body
 

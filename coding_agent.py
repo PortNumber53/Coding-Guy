@@ -33,8 +33,8 @@ and edits. Prefer patch_file over write_file when modifying existing files.\
 def get_api_key():
     key = os.getenv("NVIDIA_API_KEY")
     if not key:
-        print("Error: NVIDIA_API_KEY not found in environment or .env file.")
-        print("Copy .env.example to .env and add your key.")
+        print("Error: NVIDIA_API_KEY not found in environment or .env file.", file=sys.stderr)
+        print("Copy .env.example to .env and add your key.", file=sys.stderr)
         sys.exit(1)
     return key
 
@@ -64,7 +64,7 @@ def call_nvidia_api(messages, api_key, stream=True):
         "chat_template_kwargs": {"thinking": True},
     }
 
-    response = requests.post(INVOKE_URL, headers=headers, json=payload, stream=stream)
+    response = requests.post(INVOKE_URL, headers=headers, json=payload, stream=stream, timeout=300)
     response.raise_for_status()
 
     if not stream:
@@ -90,7 +90,7 @@ def call_nvidia_api(messages, api_key, stream=True):
 
             # Text content
             if delta.get("content"):
-                print(delta["content"], end="", flush=True)
+                print(delta["content"], end="", flush=True, file=sys.stderr)
                 content_parts.append(delta["content"])
 
             # Tool call deltas
@@ -116,7 +116,7 @@ def call_nvidia_api(messages, api_key, stream=True):
 
     content = "".join(content_parts)
     if content:
-        print()  # newline after streamed text
+        print(file=sys.stderr)  # newline after streamed text
 
     # Build the assembled message
     message = {"role": "assistant"}
@@ -140,7 +140,7 @@ def execute_tool(name, arguments_str):
     if not handler:
         return json.dumps({"error": f"Unknown tool: {name}"})
 
-    print(f"  -> {name}({', '.join(f'{k}={repr(v)[:60]}' for k, v in args.items())})")
+    print(f"  -> {name}({', '.join(f'{k}={repr(v)[:60]}' for k, v in args.items())})", file=sys.stderr)
     return handler(args)
 
 
@@ -149,12 +149,12 @@ def agent_loop(user_input, conversation_history, api_key):
     messages = build_messages(conversation_history, user_input)
 
     for round_num in range(MAX_TOOL_ROUNDS):
-        print("\nAssistant: " if round_num == 0 else "", end="", flush=True)
+        print("\nAssistant: " if round_num == 0 else "", end="", flush=True, file=sys.stderr)
 
         try:
             assistant_msg = call_nvidia_api(messages, api_key, stream=True)
         except requests.exceptions.HTTPError as e:
-            print(f"\nAPI error: {e}")
+            print(f"\nAPI error: {e}", file=sys.stderr)
             return None
 
         messages.append(assistant_msg)
@@ -165,7 +165,7 @@ def agent_loop(user_input, conversation_history, api_key):
             return assistant_msg.get("content", "")
 
         # Execute each tool call and add results
-        print("\n[Tool calls]")
+        print("\n[Tool calls]", file=sys.stderr)
         for tc in tool_calls:
             fn_name = tc["function"]["name"]
             fn_args = tc["function"]["arguments"]
@@ -173,7 +173,7 @@ def agent_loop(user_input, conversation_history, api_key):
 
             # Show a preview of the result
             result_preview = result[:200] + ("..." if len(result) > 200 else "")
-            print(f"  <- {result_preview}")
+            print(f"  <- {result_preview}", file=sys.stderr)
 
             messages.append({
                 "role": "tool",
@@ -181,9 +181,9 @@ def agent_loop(user_input, conversation_history, api_key):
                 "content": result,
             })
 
-        print()  # spacer before next model response
+        print(file=sys.stderr)  # spacer before next model response
 
-    print("\n[Reached maximum tool rounds]")
+    print("\n[Reached maximum tool rounds]", file=sys.stderr)
     return assistant_msg.get("content", "")
 
 
@@ -191,25 +191,25 @@ def main():
     api_key = get_api_key()
     conversation_history = []
 
-    print("Nvidia Coding Agent (Kimi K2.5)")
-    print("Tools: read_file, write_file, patch_file, web")
-    print("Type 'quit' to exit, 'clear' to reset conversation.\n")
+    print("Nvidia Coding Agent (Kimi K2.5)", file=sys.stderr)
+    print("Tools: read_file, write_file, patch_file, web", file=sys.stderr)
+    print("Type 'quit' to exit, 'clear' to reset conversation.\n", file=sys.stderr)
 
     while True:
         try:
             user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
+            print("\nGoodbye!", file=sys.stderr)
             break
 
         if not user_input:
             continue
         if user_input.lower() == "quit":
-            print("Goodbye!")
+            print("Goodbye!", file=sys.stderr)
             break
         if user_input.lower() == "clear":
             conversation_history.clear()
-            print("Conversation cleared.\n")
+            print("Conversation cleared.\n", file=sys.stderr)
             continue
 
         reply = agent_loop(user_input, conversation_history, api_key)
