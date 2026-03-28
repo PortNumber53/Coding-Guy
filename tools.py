@@ -152,7 +152,7 @@ TOOL_DEFINITIONS = [
             "name": "patch_file",
             "description": (
                 "Apply search-and-replace patches to an existing file. "
-                "Each patch has an 'old' string to find and a 'new' string to replace it with. "
+                "Each patch replaces only the *first* occurrence of an 'old' string with a 'new' string. "
                 "Patches are applied in order. Use this for targeted edits instead of rewriting entire files."
             ),
             "parameters": {
