@@ -135,9 +135,9 @@ def ls_file(path: str = ".") -> str:
 def execute_command(command: str, working_dir: str | None = None) -> str:
     """Execute a shell command inside the Docker container."""
     dm = _get_docker_manager()
-    cmd = ["bash", "-c", command]
     if working_dir:
-        cmd = ["bash", "-c", f"cd {working_dir} && {command}"]
+        command = f"cd {shlex.quote(working_dir)} && {command}"
+    cmd = ["bash", "-c", command]
     rc, stdout, stderr = dm.exec(cmd)
     # Limit output to avoid flooding context
     max_output = 50000
