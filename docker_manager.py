@@ -14,7 +14,7 @@ DOCKERFILE_SEARCH_PATHS = [
 DEFAULT_DOCKERFILE = """\
 FROM ubuntu:22.04
 
-RUN apt-get update && apt-get install -y \\
+RUN apt-get update && apt-get install -y --no-install-recommends \\
     python3 python3-pip python3-venv \\
     nodejs npm \\
     golang-go \\
@@ -33,16 +33,18 @@ MOUNT_TARGET = "/workspace"
 class DockerManager:
     """Manages a persistent Docker container for sandboxed tool execution."""
 
-    def __init__(self, work_dir: str):
+    def __init__(self, work_dir: str, subprocess_timeout: int = 300):
         self.work_dir = os.path.abspath(work_dir)
         self.container_id: str | None = None
         self.image_tag: str = IMAGE_NAME
+        self.subprocess_timeout = subprocess_timeout
         atexit.register(self.cleanup)
 
-    def _run(self, cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    def _run(self, cmd: list[str], timeout: int | None = None, **kwargs) -> subprocess.CompletedProcess:
         """Run a subprocess command."""
         return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300, **kwargs
+            cmd, capture_output=True, text=True,
+            timeout=timeout or self.subprocess_timeout, **kwargs
         )
 
     def find_dockerfile(self) -> str | None:

@@ -44,7 +44,9 @@ def write_file(path: str, content: str) -> str:
     dm = _get_docker_manager()
     dir_path = os.path.dirname(path)
     if dir_path:
-        dm.exec(["mkdir", "-p", dir_path])
+        rc, _, stderr = dm.exec(["mkdir", "-p", dir_path])
+        if rc != 0:
+            return json.dumps({"error": f"Failed to create directory '{dir_path}': {stderr.strip()}"})
     rc, _, stderr = dm.exec(["tee", path], stdin_data=content)
     if rc != 0:
         return json.dumps({"error": f"Failed to write {path}: {stderr.strip()}"})
@@ -60,7 +62,7 @@ def patch_file(path: str, patches: list[dict]) -> str:
     dm = _get_docker_manager()
     rc, content, stderr = dm.exec(["cat", path])
     if rc != 0:
-        return json.dumps({"error": f"File not found: {path}"})
+        return json.dumps({"error": f"Failed to read file for patching {path}: {stderr.strip()}"})
 
     original = content
     applied = []
