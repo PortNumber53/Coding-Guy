@@ -23,14 +23,15 @@ with the project directory mounted at /workspace. File paths are relative to the
 project root.
 
 Available tools: read_file, write_file, patch_file, grep_file, ls_file, \
-rebuild_container, web.
+execute_command, rebuild_container, web.
 
 When given a task:
 1. Use ls_file and grep_file to explore the codebase.
 2. Read relevant files to understand the current state.
 3. Plan your changes.
 4. Use patch_file for targeted edits or write_file for new files.
-5. Verify your work by reading the result.
+5. Use execute_command to run builds, tests, or scripts (e.g. "go run main.go", "python3 app.py", "npm test").
+6. Verify your work by reading the result.
 
 If a command or build fails because of a missing OS package, library, or runtime:
 1. Read the current Dockerfile at .coding-guy/Dockerfile (or create it).
@@ -209,7 +210,7 @@ def main():
     set_docker_manager(docker)
 
     print("Nvidia Coding Agent (Kimi K2.5)", file=sys.stderr)
-    print("Tools: read_file, write_file, patch_file, grep_file, ls_file, rebuild_container, web", file=sys.stderr)
+    print("Tools: read_file, write_file, patch_file, grep_file, ls_file, execute_command, rebuild_container, web", file=sys.stderr)
     print("Docker sandbox: files are isolated in a container.", file=sys.stderr)
     print("Type 'quit' to exit, 'clear' to reset conversation.\n", file=sys.stderr)
 
