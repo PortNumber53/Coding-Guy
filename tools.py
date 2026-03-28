@@ -1,6 +1,7 @@
 """Tools the coding agent can call, executing inside a Docker sandbox."""
 
 import difflib
+import inspect
 import json
 import os
 
@@ -129,6 +130,26 @@ def ls_file(path: str = ".") -> str:
     if rc != 0:
         return json.dumps({"error": f"Failed to list {path}: {stderr.strip()}"})
     return json.dumps({"path": path, "entries": stdout.strip()})
+
+
+def execute_command(command: str, working_dir: str | None = None) -> str:
+    """Execute a shell command inside the Docker container."""
+    dm = _get_docker_manager()
+    cmd = ["bash", "-c", command]
+    if working_dir:
+        cmd = ["bash", "-c", f"cd {working_dir} && {command}"]
+    rc, stdout, stderr = dm.exec(cmd)
+    # Limit output to avoid flooding context
+    max_output = 50000
+    stdout_truncated = len(stdout) > max_output
+    stderr_truncated = len(stderr) > max_output
+    return json.dumps({
+        "exit_code": rc,
+        "stdout": stdout[:max_output],
+        "stderr": stderr[:max_output],
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+    })
 
 
 def rebuild_container() -> str:
@@ -294,6 +315,31 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "execute_command",
+            "description": (
+                "Execute a shell command inside the Docker sandbox. Use this to "
+                "run builds, tests, scripts, install packages, or any shell command. "
+                "Returns stdout, stderr, and exit code."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute (run via bash -c)."
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Optional working directory (default: /workspace)."
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "rebuild_container",
             "description": (
                 "Rebuild and restart the Docker sandbox. Use this after modifying "
@@ -342,13 +388,25 @@ TOOL_DEFINITIONS = [
     },
 ]
 
-# Map function names to callables
+def _make_handler(func):
+    """Create a handler that filters out unexpected keyword arguments."""
+    valid_params = set(inspect.signature(func).parameters.keys())
+
+    def handler(args):
+        filtered = {k: v for k, v in args.items() if k in valid_params}
+        return func(**filtered)
+
+    return handler
+
+
+# Map function names to callables (handlers filter unexpected kwargs from LLM)
 TOOL_HANDLERS = {
-    "read_file": lambda args: read_file(**args),
-    "write_file": lambda args: write_file(**args),
-    "patch_file": lambda args: patch_file(**args),
-    "grep_file": lambda args: grep_file(**args),
-    "ls_file": lambda args: ls_file(**args),
+    "read_file": _make_handler(read_file),
+    "write_file": _make_handler(write_file),
+    "patch_file": _make_handler(patch_file),
+    "grep_file": _make_handler(grep_file),
+    "ls_file": _make_handler(ls_file),
+    "execute_command": _make_handler(execute_command),
     "rebuild_container": lambda args: rebuild_container(),
-    "web": lambda args: web(**args),
+    "web": _make_handler(web),
 }
