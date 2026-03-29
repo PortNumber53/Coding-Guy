@@ -165,13 +165,23 @@ class DockerManager:
 
         # When SSH is not available, rewrite SSH URLs to HTTPS using GIT_TOKEN.
         if self.ssh_mode == "none":
-            git_token = os.getenv("GIT_TOKEN")
-            if git_token:
-                self._configure_https_fallback(git_token)
+            self._try_configure_https_fallback()
+
+    def _try_configure_https_fallback(self) -> None:
+        """Configure HTTPS fallback if GIT_TOKEN is available."""
+        git_token = os.getenv("GIT_TOKEN")
+        if git_token:
+            self._configure_https_fallback(git_token)
 
     def _configure_https_fallback(self, git_token: str) -> None:
         """Set up git to rewrite SSH URLs to HTTPS and authenticate with a token."""
-        for host in ("github.com", "gitlab.com", "bitbucket.org"):
+        # Each provider requires a specific username for token-based auth.
+        host_credentials = {
+            "github.com": f"https://x-access-token:{git_token}@github.com",
+            "gitlab.com": f"https://oauth2:{git_token}@gitlab.com",
+            "bitbucket.org": f"https://x-token-auth:{git_token}@bitbucket.org",
+        }
+        for host in host_credentials:
             # Rewrite git@host: → https://host/
             self._run([
                 "docker", "exec", self.container_id,
@@ -179,9 +189,7 @@ class DockerManager:
                 f"url.https://{host}/.insteadOf", f"git@{host}:",
             ])
         # Store credentials so the token is not exposed in remote URLs.
-        cred_lines = "\n".join(
-            f"https://{git_token}@{h}" for h in ("github.com", "gitlab.com", "bitbucket.org")
-        ) + "\n"
+        cred_lines = "\n".join(host_credentials.values()) + "\n"
         self._run([
             "docker", "exec", "-i", self.container_id,
             "bash", "-c", "cat > /root/.git-credentials",
@@ -217,9 +225,7 @@ class DockerManager:
                 print(f"  Warning: {msg}", file=sys.stderr)
                 self.startup_warnings.append(msg)
                 self.ssh_mode = "none"
-                git_token = os.getenv("GIT_TOKEN")
-                if git_token:
-                    self._configure_https_fallback(git_token)
+                self._try_configure_https_fallback()
 
     def exec(self, cmd: list[str], stdin_data: str | None = None) -> tuple[int, str, str]:
         """Execute a command inside the container.
