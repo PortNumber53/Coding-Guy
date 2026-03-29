@@ -79,8 +79,8 @@ def make_progress_callback(chat, loop):
         )
         try:
             future.result(timeout=10)
-        except Exception:
-            pass  # progress reporting is best-effort
+        except Exception as e:
+            logger.warning(f"Failed to send progress update: {e}")
 
     return callback
 

@@ -185,7 +185,8 @@ def agent_loop(user_input, conversation_history, api_key, docker_manager=None,
     STATUS_COMPLETE, STATUS_MAX_ROUNDS, or STATUS_ERROR.
     """
     messages = build_messages(conversation_history, user_input, docker_manager)
-    effective_max = max_rounds or MAX_TOOL_ROUNDS
+    effective_max = MAX_TOOL_ROUNDS if max_rounds is None else max_rounds
+    assistant_msg = {}
 
     for round_num in range(effective_max):
         print("\nAssistant: " if round_num == 0 else "", end="", flush=True, file=sys.stderr)
