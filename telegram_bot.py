@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+from collections import defaultdict
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -13,9 +14,12 @@ from coding_agent import agent_loop
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "21031"))
 
 # Per-chat conversation history: chat_id -> list of message dicts
 _chat_histories: dict[int, list] = {}
+# Per-chat locks to serialize message processing
+_chat_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def split_message(text: str, max_len: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
@@ -49,41 +53,49 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle /clear command."""
     chat_id = update.effective_chat.id
     _chat_histories.pop(chat_id, None)
+    _chat_locks.pop(chat_id, None)
     await update.message.reply_text("Conversation cleared.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming text messages."""
     chat_id = update.effective_chat.id
-    user_text = update.message.text.strip()
+    lock = _chat_locks[chat_id]
 
-    if not user_text:
-        return
+    async with lock:
+        user_text = update.message.text.strip()
 
-    api_key = context.bot_data["api_key"]
-    history = _chat_histories.setdefault(chat_id, [])
+        if not user_text:
+            return
 
-    # Send typing indicator
-    await update.effective_chat.send_action("typing")
+        api_key = context.bot_data["api_key"]
+        history = _chat_histories.setdefault(chat_id, [])
 
-    # Run the blocking agent_loop in a thread
-    reply = await asyncio.to_thread(agent_loop, user_text, history, api_key)
+        # Send typing indicator
+        await update.effective_chat.send_action("typing")
 
-    if reply is None:
-        await update.message.reply_text("Sorry, an error occurred while processing your request.")
-        return
+        # Run the blocking agent_loop in a thread
+        try:
+            reply = await asyncio.to_thread(agent_loop, user_text, history, api_key)
+        except Exception as e:
+            logger.error(f"Error in agent_loop for chat {chat_id}: {e}", exc_info=True)
+            reply = None
 
-    # Update conversation history
-    history.append({"role": "user", "content": user_text})
-    history.append({"role": "assistant", "content": reply})
+        if reply is None:
+            await update.message.reply_text("Sorry, an error occurred while processing your request.")
+            return
 
-    # Send reply, splitting if necessary
-    for chunk in split_message(reply):
-        await update.message.reply_text(chunk)
+        # Update conversation history
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": reply})
+
+        # Send reply, splitting if necessary
+        for chunk in split_message(reply):
+            await update.message.reply_text(chunk)
 
 
-def run_telegram_bot(api_key: str, docker_manager) -> None:
-    """Start the Telegram bot webhook server on 0.0.0.0:21031."""
+def run_telegram_bot(api_key: str) -> None:
+    """Start the Telegram bot webhook server."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         print("Error: TELEGRAM_BOT_TOKEN not found in environment or .env file.", file=sys.stderr)
@@ -110,11 +122,11 @@ def run_telegram_bot(api_key: str, docker_manager) -> None:
     app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print(f"Starting Telegram webhook server on 0.0.0.0:21031", file=sys.stderr)
+    print(f"Starting Telegram webhook server on 0.0.0.0:{WEBHOOK_PORT}", file=sys.stderr)
     print(f"Webhook URL: {webhook_url}", file=sys.stderr)
 
     app.run_webhook(
         listen="0.0.0.0",
-        port=21031,
+        port=WEBHOOK_PORT,
         webhook_url=webhook_url,
     )

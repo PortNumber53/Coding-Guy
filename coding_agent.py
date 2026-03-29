@@ -217,7 +217,7 @@ def main():
     if args.serve:
         from telegram_bot import run_telegram_bot
         try:
-            run_telegram_bot(api_key, docker)
+            run_telegram_bot(api_key)
         finally:
             docker.cleanup()
         return
