@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -28,7 +29,8 @@ with the project directory mounted at /workspace. File paths are relative to the
 project root.
 
 Available tools: read_file, write_file, patch_file, grep_file, ls_file, \
-execute_command, rebuild_container, web.
+execute_command, multi_read_file, multi_write_file, read_dockerfile, \
+write_dockerfile, rebuild_container, web.
 
 When given a task:
 1. Use ls_file and grep_file to explore the codebase.
@@ -39,10 +41,11 @@ When given a task:
 6. Verify your work by reading the result.
 
 If a command or build fails because of a missing OS package, library, or runtime:
-1. Read the current Dockerfile at .coding-guy/Dockerfile (or create it).
-2. Add the missing package to the apt-get install line (or add new install commands).
-3. Call rebuild_container to rebuild the sandbox with the updated Dockerfile.
-4. Retry the failed operation.
+1. Call read_dockerfile to get the current Dockerfile content.
+2. Modify the content to add the missing package (e.g. to the apt-get install line).
+3. Call write_dockerfile with the updated content.
+4. Call rebuild_container to rebuild the sandbox with the updated Dockerfile.
+5. Retry the failed operation.
 
 You have plenty of tool rounds available. Work through the entire task methodically — \
 explore, implement, verify, and fix issues until the task is truly complete. \
@@ -191,10 +194,30 @@ def agent_loop(user_input, conversation_history, api_key, docker_manager=None,
     for round_num in range(effective_max):
         print("\nAssistant: " if round_num == 0 else "", end="", flush=True, file=sys.stderr)
 
-        try:
-            assistant_msg = call_nvidia_api(messages, api_key, stream=True)
-        except requests.exceptions.HTTPError as e:
-            print(f"\nAPI error: {e}", file=sys.stderr)
+        max_retries = 4
+        for attempt in range(max_retries + 1):
+            try:
+                assistant_msg = call_nvidia_api(messages, api_key, stream=True)
+                break
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if e.response is not None else 0
+                if (status_code == 429 or status_code >= 500) and attempt < max_retries:
+                    wait = 2 ** (attempt + 1)
+                    print(f"\nAPI error ({status_code}), retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                    time.sleep(wait)
+                    continue
+                print(f"\nAPI error: {e}", file=sys.stderr)
+                return None, STATUS_ERROR
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if attempt < max_retries:
+                    wait = 2 ** (attempt + 1)
+                    print(f"\nConnection error, retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                    time.sleep(wait)
+                    continue
+                print(f"\nAPI error: {e}", file=sys.stderr)
+                return None, STATUS_ERROR
+        else:
+            print(f"\nAPI error: max retries exceeded", file=sys.stderr)
             return None, STATUS_ERROR
 
         messages.append(assistant_msg)
@@ -253,7 +276,7 @@ def main():
         return
 
     print("Nvidia Coding Agent (Kimi K2.5)", file=sys.stderr)
-    print("Tools: read_file, write_file, patch_file, grep_file, ls_file, execute_command, rebuild_container, web", file=sys.stderr)
+    print("Tools: read_file, write_file, patch_file, grep_file, ls_file, execute_command, multi_read_file, multi_write_file, read_dockerfile, write_dockerfile, rebuild_container, web", file=sys.stderr)
     print("Docker sandbox: files are isolated in a container.", file=sys.stderr)
     print("Type 'quit' to exit, 'clear' to reset conversation.\n", file=sys.stderr)
 
