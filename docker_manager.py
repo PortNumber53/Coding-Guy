@@ -117,22 +117,20 @@ class DockerManager:
 
     def _configure_git(self) -> None:
         """Set git identity inside the container when env vars are present."""
-        user_name = os.getenv("GIT_USER_NAME")
-        user_email = os.getenv("GIT_USER_EMAIL")
-        if user_name:
-            result = self._run(["docker", "exec", self.container_id,
-                        "git", "config", "--global", "user.name", user_name])
-            if result.returncode != 0:
-                msg = f"Failed to set git user.name: {result.stderr.strip()}"
-                print(f"  Warning: {msg}", file=sys.stderr)
-                self.startup_warnings.append(msg)
-        if user_email:
-            result = self._run(["docker", "exec", self.container_id,
-                        "git", "config", "--global", "user.email", user_email])
-            if result.returncode != 0:
-                msg = f"Failed to set git user.email: {result.stderr.strip()}"
-                print(f"  Warning: {msg}", file=sys.stderr)
-                self.startup_warnings.append(msg)
+        configs = {
+            "user.name": os.getenv("GIT_USER_NAME"),
+            "user.email": os.getenv("GIT_USER_EMAIL"),
+        }
+        for key, value in configs.items():
+            if value:
+                result = self._run([
+                    "docker", "exec", self.container_id,
+                    "git", "config", "--global", key, value
+                ])
+                if result.returncode != 0:
+                    msg = f"Failed to set git {key}: {result.stderr.strip()}"
+                    print(f"  Warning: {msg}", file=sys.stderr)
+                    self.startup_warnings.append(msg)
 
     def exec(self, cmd: list[str], stdin_data: str | None = None) -> tuple[int, str, str]:
         """Execute a command inside the container.
