@@ -20,7 +20,9 @@ MODEL = "moonshotai/kimi-k2.5"
 MAX_TOOL_ROUNDS = 50
 
 # Dedicated workspace directory for the agent's Docker sandbox.
-DEFAULT_WORKSPACE = os.path.join(os.path.expanduser("~"), "coding-guy-workspace")
+DEFAULT_WORKSPACE = os.environ.get(
+    "WORKSPACE_DIR", os.path.join(os.path.expanduser("~"), "coding-guy-workspace")
+)
 
 STATUS_COMPLETE = "complete"
 STATUS_MAX_ROUNDS = "max_rounds"
