@@ -19,6 +19,11 @@ INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 MODEL = "moonshotai/kimi-k2.5"
 MAX_TOOL_ROUNDS = 50
 
+# Dedicated workspace directory for the agent's Docker sandbox.
+DEFAULT_WORKSPACE = os.environ.get(
+    "WORKSPACE_DIR", os.path.join(os.path.expanduser("~"), "coding-guy-workspace")
+)
+
 STATUS_COMPLETE = "complete"
 STATUS_MAX_ROUNDS = "max_rounds"
 STATUS_ERROR = "error"
@@ -259,13 +264,21 @@ def agent_loop(user_input, conversation_history, api_key, docker_manager=None,
 def main():
     parser = argparse.ArgumentParser(description="Coding agent powered by Nvidia API (Kimi K2.5)")
     parser.add_argument("--serve", action="store_true", help="Start Telegram bot webhook server")
+    parser.add_argument(
+        "--workspace",
+        default=DEFAULT_WORKSPACE,
+        help="Workspace directory for the agent sandbox (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     api_key = get_api_key()
     conversation_history = []
 
-    # Initialize Docker sandbox
-    docker = DockerManager(work_dir=os.getcwd())
+    # Ensure the dedicated workspace directory exists.
+    os.makedirs(args.workspace, exist_ok=True)
+
+    # Initialize Docker sandbox with the dedicated workspace.
+    docker = DockerManager(work_dir=args.workspace)
     set_docker_manager(docker)
 
     if args.serve:
