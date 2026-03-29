@@ -29,6 +29,9 @@ IMAGE_NAME = "coding-guy-sandbox"
 CONTAINER_PREFIX = "coding-guy-session"
 MOUNT_TARGET = "/workspace"
 
+# Optional environment variables forwarded into the container.
+_ENV_FORWARD = ["GIT_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL"]
+
 
 class DockerManager:
     """Manages a persistent Docker container for sandboxed tool execution."""
@@ -97,14 +100,30 @@ class DockerManager:
             "--name", name,
             "-v", f"{self.work_dir}:{MOUNT_TARGET}",
             "-w", MOUNT_TARGET,
-            self.image_tag,
-            "tail", "-f", "/dev/null",
         ]
+        # Forward optional env vars (e.g. GIT_TOKEN) into the container.
+        for var in _ENV_FORWARD:
+            val = os.getenv(var)
+            if val:
+                cmd.extend(["-e", f"{var}={val}"])
+        cmd.extend([self.image_tag, "tail", "-f", "/dev/null"])
         result = self._run(cmd)
         if result.returncode != 0:
             raise RuntimeError(f"Container start failed:\n{result.stderr}")
         self.container_id = result.stdout.strip()
         print(f"  Container started: {name}", file=sys.stderr)
+        self._configure_git()
+
+    def _configure_git(self) -> None:
+        """Set git identity inside the container when env vars are present."""
+        user_name = os.getenv("GIT_USER_NAME")
+        user_email = os.getenv("GIT_USER_EMAIL")
+        if user_name:
+            self._run(["docker", "exec", self.container_id,
+                        "git", "config", "--global", "user.name", user_name])
+        if user_email:
+            self._run(["docker", "exec", self.container_id,
+                        "git", "config", "--global", "user.email", user_email])
 
     def exec(self, cmd: list[str], stdin_data: str | None = None) -> tuple[int, str, str]:
         """Execute a command inside the container.
