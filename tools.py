@@ -152,6 +152,43 @@ def execute_command(command: str, working_dir: str | None = None) -> str:
     })
 
 
+def multi_read_file(paths: list[str]) -> str:
+    """Read multiple files inside the Docker container in one call."""
+    dm = _get_docker_manager()
+    results = []
+    for path in paths:
+        rc, stdout, stderr = dm.exec(["cat", path])
+        if rc != 0:
+            results.append({"path": path, "error": f"Failed to read {path}: {stderr.strip()}"})
+        else:
+            results.append({"path": path, "content": stdout, "size": len(stdout)})
+    return json.dumps({"results": results})
+
+
+def multi_write_file(files: list[dict]) -> str:
+    """Write multiple files inside the Docker container in one call."""
+    dm = _get_docker_manager()
+    results = []
+    for entry in files:
+        path = entry.get("path")
+        content = entry.get("content")
+        if path is None or content is None:
+            results.append({"error": "Each file entry must have 'path' and 'content' keys.", "entry_keys": list(entry.keys())})
+            continue
+        dir_path = os.path.dirname(path)
+        if dir_path:
+            rc, _, stderr = dm.exec(["mkdir", "-p", dir_path])
+            if rc != 0:
+                results.append({"path": path, "error": f"Failed to create directory '{dir_path}': {stderr.strip()}"})
+                continue
+        rc, _, stderr = dm.exec(["tee", path], stdin_data=content)
+        if rc != 0:
+            results.append({"path": path, "error": f"Failed to write {path}: {stderr.strip()}"})
+        else:
+            results.append({"path": path, "status": "written", "size": len(content)})
+    return json.dumps({"results": results})
+
+
 def rebuild_container() -> str:
     """Rebuild the Docker sandbox after Dockerfile changes."""
     dm = _get_docker_manager()
@@ -159,6 +196,35 @@ def rebuild_container() -> str:
         info = dm.rebuild()
         return json.dumps(info)
     except RuntimeError as e:
+        return json.dumps({"error": str(e)})
+
+
+def read_dockerfile() -> str:
+    """Read the current Dockerfile content from the host filesystem."""
+    dm = _get_docker_manager()
+    path = dm.find_dockerfile()
+    if path:
+        try:
+            with open(path) as f:
+                content = f.read()
+            return json.dumps({"path": path, "content": content, "source": "custom"})
+        except OSError as e:
+            return json.dumps({"error": str(e)})
+    else:
+        from docker_manager import DEFAULT_DOCKERFILE
+        return json.dumps({"content": DEFAULT_DOCKERFILE, "source": "default (embedded)"})
+
+
+def write_dockerfile(content: str) -> str:
+    """Write or update the Dockerfile on the host filesystem."""
+    dm = _get_docker_manager()
+    path = dm.get_dockerfile_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(content)
+        return json.dumps({"path": path, "status": "written", "size": len(content)})
+    except OSError as e:
         return json.dumps({"error": str(e)})
 
 
@@ -340,16 +406,102 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "multi_read_file",
+            "description": "Read multiple files at once. Returns an array of results, each with path and content (or error).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of file paths to read."
+                    }
+                },
+                "required": ["paths"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "multi_write_file",
+            "description": "Write multiple files at once. Each entry needs a path and content. Creates parent directories as needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Path to the file to write."
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "The content to write to the file."
+                                }
+                            },
+                            "required": ["path", "content"]
+                        },
+                        "description": "List of files to write, each with path and content."
+                    }
+                },
+                "required": ["files"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "rebuild_container",
             "description": (
-                "Rebuild and restart the Docker sandbox. Use this after modifying "
-                "the Dockerfile at .coding-guy/Dockerfile to install new packages "
-                "or libraries. The workspace files are preserved across rebuilds."
+                "Rebuild and restart the Docker sandbox. Use this after calling "
+                "write_dockerfile to apply Dockerfile changes. The workspace "
+                "files are preserved across rebuilds."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {},
                 "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_dockerfile",
+            "description": (
+                "Read the current Dockerfile used to build the sandbox. "
+                "Returns the content whether it's a custom Dockerfile or the "
+                "embedded default. This reads from the host, not inside the container."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_dockerfile",
+            "description": (
+                "Write or update the Dockerfile used to build the sandbox. "
+                "This writes to the host filesystem. After writing, call "
+                "rebuild_container to apply the changes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The full Dockerfile content."
+                    }
+                },
+                "required": ["content"]
             }
         }
     },
@@ -407,6 +559,10 @@ TOOL_HANDLERS = {
     "grep_file": _make_handler(grep_file),
     "ls_file": _make_handler(ls_file),
     "execute_command": _make_handler(execute_command),
+    "multi_read_file": _make_handler(multi_read_file),
+    "multi_write_file": _make_handler(multi_write_file),
     "rebuild_container": lambda args: rebuild_container(),
+    "read_dockerfile": lambda args: read_dockerfile(),
+    "write_dockerfile": _make_handler(write_dockerfile),
     "web": _make_handler(web),
 }
