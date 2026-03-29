@@ -121,6 +121,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("Sorry, an error occurred while processing your request.")
             return
 
+        if not reply.strip():
+            await update.message.reply_text("(No response generated.)")
+            return
+
         # Append status indicator for incomplete results
         if status == STATUS_MAX_ROUNDS:
             reply += "\n\n-- Reached maximum tool rounds. The task may be incomplete."
@@ -131,7 +135,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # Send reply, splitting if necessary
         for chunk in split_message(reply):
-            await update.message.reply_text(chunk)
+            if chunk.strip():
+                await update.message.reply_text(chunk)
 
 
 def run_telegram_bot(api_key: str) -> None:
