@@ -29,6 +29,9 @@ IMAGE_NAME = "coding-guy-sandbox"
 CONTAINER_PREFIX = "coding-guy-session"
 MOUNT_TARGET = "/workspace"
 
+# Optional environment variables forwarded into the container.
+_ENV_FORWARD = ["GIT_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL"]
+
 
 class DockerManager:
     """Manages a persistent Docker container for sandboxed tool execution."""
@@ -38,6 +41,7 @@ class DockerManager:
         self.container_id: str | None = None
         self.image_tag: str = IMAGE_NAME
         self.subprocess_timeout = subprocess_timeout
+        self.startup_warnings: list[str] = []
         atexit.register(self.cleanup)
 
     def _run(self, cmd: list[str], timeout: int | None = None, **kwargs) -> subprocess.CompletedProcess:
@@ -97,14 +101,36 @@ class DockerManager:
             "--name", name,
             "-v", f"{self.work_dir}:{MOUNT_TARGET}",
             "-w", MOUNT_TARGET,
-            self.image_tag,
-            "tail", "-f", "/dev/null",
         ]
+        # Forward optional env vars (e.g. GIT_TOKEN) into the container.
+        for var in _ENV_FORWARD:
+            val = os.getenv(var)
+            if val:
+                cmd.extend(["-e", f"{var}={val}"])
+        cmd.extend([self.image_tag, "tail", "-f", "/dev/null"])
         result = self._run(cmd)
         if result.returncode != 0:
             raise RuntimeError(f"Container start failed:\n{result.stderr}")
         self.container_id = result.stdout.strip()
         print(f"  Container started: {name}", file=sys.stderr)
+        self._configure_git()
+
+    def _configure_git(self) -> None:
+        """Set git identity inside the container when env vars are present."""
+        configs = {
+            "user.name": os.getenv("GIT_USER_NAME"),
+            "user.email": os.getenv("GIT_USER_EMAIL"),
+        }
+        for key, value in configs.items():
+            if value:
+                result = self._run([
+                    "docker", "exec", self.container_id,
+                    "git", "config", "--global", key, value
+                ])
+                if result.returncode != 0:
+                    msg = f"Failed to set git {key}: {result.stderr.strip()}"
+                    print(f"  Warning: {msg}", file=sys.stderr)
+                    self.startup_warnings.append(msg)
 
     def exec(self, cmd: list[str], stdin_data: str | None = None) -> tuple[int, str, str]:
         """Execute a command inside the container.
@@ -142,6 +168,7 @@ class DockerManager:
     def rebuild(self) -> dict:
         """Rebuild image and restart container (used after Dockerfile changes)."""
         self.cleanup()
+        self.startup_warnings.clear()
         info = self.build_image()
         self.start_container()
         info["status"] = "rebuilt"
