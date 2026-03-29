@@ -170,8 +170,11 @@ def multi_write_file(files: list[dict]) -> str:
     dm = _get_docker_manager()
     results = []
     for entry in files:
-        path = entry["path"]
-        content = entry["content"]
+        path = entry.get("path")
+        content = entry.get("content")
+        if path is None or content is None:
+            results.append({"error": "Each file entry must have 'path' and 'content' keys.", "entry_keys": list(entry.keys())})
+            continue
         dir_path = os.path.dirname(path)
         if dir_path:
             rc, _, stderr = dm.exec(["mkdir", "-p", dir_path])

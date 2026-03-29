@@ -199,23 +199,24 @@ def agent_loop(user_input, conversation_history, api_key, docker_manager=None,
             try:
                 assistant_msg = call_nvidia_api(messages, api_key, stream=True)
                 break
-            except requests.exceptions.HTTPError as e:
-                status_code = e.response.status_code if e.response is not None else 0
-                if (status_code == 429 or status_code >= 500) and attempt < max_retries:
+            except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                is_http_error = isinstance(e, requests.exceptions.HTTPError)
+                status_code = e.response.status_code if is_http_error and e.response is not None else 0
+
+                is_retryable = (
+                    (is_http_error and (status_code == 429 or status_code >= 500)) or
+                    isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+                )
+
+                if is_retryable and attempt < max_retries:
                     wait = 2 ** (attempt + 1)
-                    print(f"\nAPI error ({status_code}), retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                    error_type = status_code if is_http_error else "Connection"
+                    print(f"\nAPI error ({error_type}), retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
                     time.sleep(wait)
-                    continue
-                print(f"\nAPI error: {e}", file=sys.stderr)
-                return None, STATUS_ERROR
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                if attempt < max_retries:
-                    wait = 2 ** (attempt + 1)
-                    print(f"\nConnection error, retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
-                    time.sleep(wait)
-                    continue
-                print(f"\nAPI error: {e}", file=sys.stderr)
-                return None, STATUS_ERROR
+                elif not is_retryable:
+                    print(f"\nAPI error: {e}", file=sys.stderr)
+                    return None, STATUS_ERROR
+                # else: is_retryable and it's the last attempt. Loop will finish.
         else:
             print(f"\nAPI error: max retries exceeded", file=sys.stderr)
             return None, STATUS_ERROR
