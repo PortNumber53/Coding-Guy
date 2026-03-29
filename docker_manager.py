@@ -41,6 +41,7 @@ class DockerManager:
         self.container_id: str | None = None
         self.image_tag: str = IMAGE_NAME
         self.subprocess_timeout = subprocess_timeout
+        self.startup_warnings: list[str] = []
         atexit.register(self.cleanup)
 
     def _run(self, cmd: list[str], timeout: int | None = None, **kwargs) -> subprocess.CompletedProcess:
@@ -122,12 +123,16 @@ class DockerManager:
             result = self._run(["docker", "exec", self.container_id,
                         "git", "config", "--global", "user.name", user_name])
             if result.returncode != 0:
-                print(f"Warning: Failed to set git user.name in container:\n{result.stderr}", file=sys.stderr)
+                msg = f"Failed to set git user.name: {result.stderr.strip()}"
+                print(f"  Warning: {msg}", file=sys.stderr)
+                self.startup_warnings.append(msg)
         if user_email:
             result = self._run(["docker", "exec", self.container_id,
                         "git", "config", "--global", "user.email", user_email])
             if result.returncode != 0:
-                print(f"Warning: Failed to set git user.email in container:\n{result.stderr}", file=sys.stderr)
+                msg = f"Failed to set git user.email: {result.stderr.strip()}"
+                print(f"  Warning: {msg}", file=sys.stderr)
+                self.startup_warnings.append(msg)
 
     def exec(self, cmd: list[str], stdin_data: str | None = None) -> tuple[int, str, str]:
         """Execute a command inside the container.
@@ -165,6 +170,7 @@ class DockerManager:
     def rebuild(self) -> dict:
         """Rebuild image and restart container (used after Dockerfile changes)."""
         self.cleanup()
+        self.startup_warnings.clear()
         info = self.build_image()
         self.start_container()
         info["status"] = "rebuilt"

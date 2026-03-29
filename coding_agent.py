@@ -54,8 +54,18 @@ def get_api_key():
     return key
 
 
-def build_messages(conversation_history, user_input):
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+def build_messages(conversation_history, user_input, docker_manager=None):
+    system = SYSTEM_PROMPT
+    if docker_manager and docker_manager.startup_warnings:
+        warnings = "\n".join(docker_manager.startup_warnings)
+        system += (
+            "\n\nIMPORTANT — the following issues were detected when "
+            "setting up the Docker sandbox:\n" + warnings
+            + "\nYou MUST fix these before proceeding. The most likely cause "
+            "is a missing package (e.g. git). Update the Dockerfile and call "
+            "rebuild_container, then retry the failed configuration."
+        )
+    messages = [{"role": "system", "content": system}]
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_input})
     return messages
@@ -159,9 +169,9 @@ def execute_tool(name, arguments_str):
     return handler(args)
 
 
-def agent_loop(user_input, conversation_history, api_key):
+def agent_loop(user_input, conversation_history, api_key, docker_manager=None):
     """Run the agent loop: call the model, execute tools, repeat until done."""
-    messages = build_messages(conversation_history, user_input)
+    messages = build_messages(conversation_history, user_input, docker_manager)
 
     for round_num in range(MAX_TOOL_ROUNDS):
         print("\nAssistant: " if round_num == 0 else "", end="", flush=True, file=sys.stderr)
@@ -245,7 +255,7 @@ def main():
                 print("Conversation cleared.\n", file=sys.stderr)
                 continue
 
-            reply = agent_loop(user_input, conversation_history, api_key)
+            reply = agent_loop(user_input, conversation_history, api_key, docker)
 
             if reply is not None:
                 conversation_history.append({"role": "user", "content": user_input})
