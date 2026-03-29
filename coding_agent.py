@@ -16,7 +16,11 @@ load_dotenv()
 
 INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 MODEL = "moonshotai/kimi-k2.5"
-MAX_TOOL_ROUNDS = 15
+MAX_TOOL_ROUNDS = 50
+
+STATUS_COMPLETE = "complete"
+STATUS_MAX_ROUNDS = "max_rounds"
+STATUS_ERROR = "error"
 
 SYSTEM_PROMPT = """\
 You are an expert coding agent. All file operations execute inside a Docker sandbox \
@@ -39,6 +43,10 @@ If a command or build fails because of a missing OS package, library, or runtime
 2. Add the missing package to the apt-get install line (or add new install commands).
 3. Call rebuild_container to rebuild the sandbox with the updated Dockerfile.
 4. Retry the failed operation.
+
+You have plenty of tool rounds available. Work through the entire task methodically — \
+explore, implement, verify, and fix issues until the task is truly complete. \
+If you encounter errors, debug and retry rather than giving up.
 
 Use the tools provided to complete the user's request. Be precise with file paths \
 and edits. Prefer patch_file over write_file when modifying existing files.\
@@ -169,25 +177,32 @@ def execute_tool(name, arguments_str):
     return handler(args)
 
 
-def agent_loop(user_input, conversation_history, api_key, docker_manager=None):
-    """Run the agent loop: call the model, execute tools, repeat until done."""
-    messages = build_messages(conversation_history, user_input, docker_manager)
+def agent_loop(user_input, conversation_history, api_key, docker_manager=None,
+               max_rounds=None, progress_callback=None):
+    """Run the agent loop: call the model, execute tools, repeat until done.
 
-    for round_num in range(MAX_TOOL_ROUNDS):
+    Returns (reply_text, status) where status is one of
+    STATUS_COMPLETE, STATUS_MAX_ROUNDS, or STATUS_ERROR.
+    """
+    messages = build_messages(conversation_history, user_input, docker_manager)
+    effective_max = MAX_TOOL_ROUNDS if max_rounds is None else max_rounds
+    assistant_msg = {}
+
+    for round_num in range(effective_max):
         print("\nAssistant: " if round_num == 0 else "", end="", flush=True, file=sys.stderr)
 
         try:
             assistant_msg = call_nvidia_api(messages, api_key, stream=True)
         except requests.exceptions.HTTPError as e:
             print(f"\nAPI error: {e}", file=sys.stderr)
-            return None
+            return None, STATUS_ERROR
 
         messages.append(assistant_msg)
 
         # If no tool calls, the agent is done
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
-            return assistant_msg.get("content", "")
+            return assistant_msg.get("content", ""), STATUS_COMPLETE
 
         # Execute each tool call and add results
         print("\n[Tool calls]", file=sys.stderr)
@@ -206,10 +221,15 @@ def agent_loop(user_input, conversation_history, api_key, docker_manager=None):
                 "content": result,
             })
 
+        # Report progress after tool execution
+        if progress_callback:
+            tool_names = [tc["function"]["name"] for tc in tool_calls]
+            progress_callback(round_num + 1, effective_max, tool_names)
+
         print(file=sys.stderr)  # spacer before next model response
 
     print("\n[Reached maximum tool rounds]", file=sys.stderr)
-    return assistant_msg.get("content", "")
+    return assistant_msg.get("content", ""), STATUS_MAX_ROUNDS
 
 
 def main():
@@ -255,7 +275,10 @@ def main():
                 print("Conversation cleared.\n", file=sys.stderr)
                 continue
 
-            reply = agent_loop(user_input, conversation_history, api_key, docker)
+            reply, status = agent_loop(user_input, conversation_history, api_key, docker)
+
+            if status == STATUS_MAX_ROUNDS:
+                print("[Note: reached maximum tool rounds, response may be incomplete]", file=sys.stderr)
 
             if reply is not None:
                 conversation_history.append({"role": "user", "content": user_input})

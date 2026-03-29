@@ -9,12 +9,13 @@ from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from coding_agent import agent_loop
+from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR
 
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "21031"))
+PROGRESS_REPORT_INTERVAL = 3  # send a progress update every N tool rounds
 
 # Per-chat conversation history: chat_id -> list of message dicts
 _chat_histories: dict[int, list] = {}
@@ -57,6 +58,33 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("Conversation cleared.")
 
 
+def make_progress_callback(chat, loop):
+    """Return a callback that sends progress updates to a Telegram chat.
+
+    The callback runs in the agent_loop thread and schedules sends on the
+    bot's event loop via run_coroutine_threadsafe.
+    """
+    last_reported = [0]
+
+    def callback(round_num, max_rounds, tool_names):
+        if round_num - last_reported[0] < PROGRESS_REPORT_INTERVAL:
+            return
+        last_reported[0] = round_num
+
+        tools_str = ", ".join(tool_names)
+        text = f"Round {round_num}/{max_rounds}: {tools_str}"
+
+        future = asyncio.run_coroutine_threadsafe(
+            chat.send_message(text), loop
+        )
+        try:
+            future.result(timeout=10)
+        except Exception as e:
+            logger.warning(f"Failed to send progress update: {e}")
+
+    return callback
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming text messages."""
     chat_id = update.effective_chat.id
@@ -74,16 +102,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Send typing indicator
         await update.effective_chat.send_action("typing")
 
+        # Build progress callback for Telegram updates
+        loop = asyncio.get_running_loop()
+        progress_cb = make_progress_callback(update.effective_chat, loop)
+
         # Run the blocking agent_loop in a thread
         try:
-            reply = await asyncio.to_thread(agent_loop, user_text, history, api_key)
+            reply, status = await asyncio.to_thread(
+                agent_loop, user_text, history, api_key,
+                progress_callback=progress_cb,
+            )
         except Exception as e:
             logger.error(f"Error in agent_loop for chat {chat_id}: {e}", exc_info=True)
             reply = None
+            status = STATUS_ERROR
 
         if reply is None:
             await update.message.reply_text("Sorry, an error occurred while processing your request.")
             return
+
+        # Append status indicator for incomplete results
+        if status == STATUS_MAX_ROUNDS:
+            reply += "\n\n-- Reached maximum tool rounds. The task may be incomplete."
 
         # Update conversation history
         history.append({"role": "user", "content": user_text})
