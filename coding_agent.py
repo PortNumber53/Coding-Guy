@@ -267,7 +267,7 @@ def main():
     parser.add_argument(
         "--workspace",
         default=DEFAULT_WORKSPACE,
-        help=f"Workspace directory for the agent sandbox (default: {DEFAULT_WORKSPACE})",
+        help="Workspace directory for the agent sandbox (default: %(default)s)",
     )
     args = parser.parse_args()
 
