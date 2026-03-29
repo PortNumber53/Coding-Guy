@@ -4,6 +4,7 @@ import difflib
 import inspect
 import json
 import os
+import shlex
 
 import requests
 
