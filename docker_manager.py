@@ -119,11 +119,15 @@ class DockerManager:
         user_name = os.getenv("GIT_USER_NAME")
         user_email = os.getenv("GIT_USER_EMAIL")
         if user_name:
-            self._run(["docker", "exec", self.container_id,
+            result = self._run(["docker", "exec", self.container_id,
                         "git", "config", "--global", "user.name", user_name])
+            if result.returncode != 0:
+                print(f"Warning: Failed to set git user.name in container:\n{result.stderr}", file=sys.stderr)
         if user_email:
-            self._run(["docker", "exec", self.container_id,
+            result = self._run(["docker", "exec", self.container_id,
                         "git", "config", "--global", "user.email", user_email])
+            if result.returncode != 0:
+                print(f"Warning: Failed to set git user.email in container:\n{result.stderr}", file=sys.stderr)
 
     def exec(self, cmd: list[str], stdin_data: str | None = None) -> tuple[int, str, str]:
         """Execute a command inside the container.
