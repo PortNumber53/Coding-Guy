@@ -174,6 +174,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         api_key = context.bot_data["api_key"]
+        invoke_url = context.bot_data["invoke_url"]
+        model = context.bot_data["model"]
         history = _chat_histories.setdefault(chat_id, [])
 
         # Send typing indicator
@@ -186,7 +188,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Run the blocking agent_loop in a thread
         try:
             reply, status = await asyncio.to_thread(
-                agent_loop, user_text, history, api_key,
+                agent_loop, user_text, history, api_key, invoke_url, model,
                 progress_callback=progress_cb,
             )
         except Exception as e:
@@ -217,6 +219,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(chunk)
 
 
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Tornado request handlers
 # ---------------------------------------------------------------------------
@@ -315,11 +318,10 @@ class HealthHandler(tornado.web.RequestHandler):
 # Server startup
 # ---------------------------------------------------------------------------
 
-def run_telegram_bot(api_key: str) -> None:
+def run_telegram_bot(api_key: str, invoke_url: str, model: str) -> None:
     """Start the combined Telegram + GitHub webhook server."""
     global _start_time
     _start_time = time.time()
-
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         print("Error: TELEGRAM_BOT_TOKEN not found in environment or .env file.", file=sys.stderr)
@@ -342,6 +344,8 @@ def run_telegram_bot(api_key: str) -> None:
     # Build the Telegram Application (but don't start its built-in server)
     tg_app = Application.builder().token(token).build()
     tg_app.bot_data["api_key"] = api_key
+    tg_app.bot_data["invoke_url"] = invoke_url
+    tg_app.bot_data["model"] = model
 
     tg_app.add_handler(CommandHandler("start", handle_start))
     tg_app.add_handler(CommandHandler("clear", handle_clear))

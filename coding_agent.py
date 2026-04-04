@@ -52,7 +52,7 @@ project root.
 
 Available tools: read_file, write_file, patch_file, grep_file, ls_file, \
 execute_command, multi_read_file, multi_write_file, read_dockerfile, \
-write_dockerfile, rebuild_container, web.
+write_dockerfile, rebuild_container, web, ask_ollama.
 
 When given a task:
 1. Use ls_file and grep_file to explore the codebase.
@@ -104,7 +104,7 @@ def build_messages(conversation_history, user_input, docker_manager=None):
     return messages
 
 
-def call_nvidia_api(messages, api_key, stream=True):
+def call_llm_api(messages, api_key, invoke_url, model, stream=True):
     """Call the Nvidia API. Returns the full response JSON (non-streamed) or
     the assembled message dict (streamed) including any tool_calls."""
     headers = {
@@ -112,7 +112,7 @@ def call_nvidia_api(messages, api_key, stream=True):
         "Accept": "text/event-stream" if stream else "application/json",
     }
     payload = {
-        "model": MODEL,
+        "model": model,
         "messages": messages,
         "max_tokens": 16384,
         "temperature": 1.00,
@@ -122,7 +122,7 @@ def call_nvidia_api(messages, api_key, stream=True):
         "chat_template_kwargs": {"thinking": True},
     }
 
-    response = requests.post(INVOKE_URL, headers=headers, json=payload, stream=stream, timeout=300)
+    response = requests.post(invoke_url, headers=headers, json=payload, stream=stream, timeout=300)
     response.raise_for_status()
 
     if not stream:
@@ -202,7 +202,7 @@ def execute_tool(name, arguments_str):
     return handler(args)
 
 
-def agent_loop(user_input, conversation_history, api_key, docker_manager=None,
+def agent_loop(user_input, conversation_history, api_key, invoke_url, model, docker_manager=None,
                max_rounds=None, progress_callback=None):
     """Run the agent loop: call the model, execute tools, repeat until done.
 
@@ -219,7 +219,7 @@ def agent_loop(user_input, conversation_history, api_key, docker_manager=None,
         max_retries = 4
         for attempt in range(max_retries + 1):
             try:
-                assistant_msg = call_nvidia_api(messages, api_key, stream=True)
+                assistant_msg = call_llm_api(messages, api_key, invoke_url, model, stream=True)
                 break
             except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 is_http_error = isinstance(e, requests.exceptions.HTTPError)
@@ -295,6 +295,9 @@ def main():
         default=DEFAULT_WORKSPACE,
         help="Workspace directory for the agent sandbox (default: %(default)s)",
     )
+    parser.add_argument("--ollama", action="store_true", help="Use local Ollama instead of Nvidia API")
+    parser.add_argument("--model", type=str, help="Override the model to use (default: gemma4:e4b for Ollama)")
+    parser.add_argument("--api-base", type=str, help="Override the API base URL")
     args = parser.parse_args()
 
     # Hot-reload mode: delegate to watcher which spawns the server as a child.
@@ -303,9 +306,20 @@ def main():
 
         watch_path = args.watch_path or os.path.join(os.getcwd(), ".git")
         extra_args = ["--workspace", args.workspace]
+        if args.ollama: extra_args.append("--ollama")
+        if args.model: extra_args.extend(["--model", args.model])
+        if args.api_base: extra_args.extend(["--api-base", args.api_base])
         sys.exit(run_with_reload(watch_path, extra_args))
 
-    api_key = get_api_key()
+    if args.ollama:
+        invoke_url = args.api_base or "http://127.0.0.1:11434/v1/chat/completions"
+        model_name = args.model or "gemma4:e4b"
+        api_key = "ollama"
+    else:
+        invoke_url = args.api_base or INVOKE_URL
+        model_name = args.model or MODEL
+        api_key = get_api_key()
+
     conversation_history = []
 
     # Ensure the dedicated workspace directory exists.
@@ -318,13 +332,16 @@ def main():
     if args.serve:
         from telegram_bot import run_telegram_bot
         try:
-            run_telegram_bot(api_key)
+            run_telegram_bot(api_key, invoke_url, model_name)
         finally:
             docker.cleanup()
         return
 
-    print("Nvidia Coding Agent (Kimi K2.5)", file=sys.stderr)
-    print("Tools: read_file, write_file, patch_file, grep_file, ls_file, execute_command, multi_read_file, multi_write_file, read_dockerfile, write_dockerfile, rebuild_container, web", file=sys.stderr)
+    if args.ollama:
+        print(f"Ollama Coding Agent (Model: {model_name})", file=sys.stderr)
+    else:
+        print(f"Nvidia Coding Agent (Model: {model_name})", file=sys.stderr)
+    print("Tools: read_file, write_file, patch_file, grep_file, ls_file, execute_command, multi_read_file, multi_write_file, read_dockerfile, write_dockerfile, rebuild_container, web, ask_ollama", file=sys.stderr)
     print("Docker sandbox: files are isolated in a container.", file=sys.stderr)
     print("Type 'quit' to exit, 'clear' to reset conversation.\n", file=sys.stderr)
 
@@ -346,7 +363,7 @@ def main():
                 print("Conversation cleared.\n", file=sys.stderr)
                 continue
 
-            reply, status = agent_loop(user_input, conversation_history, api_key, docker)
+            reply, status = agent_loop(user_input, conversation_history, api_key, invoke_url, model_name, docker)
 
             if status == STATUS_MAX_ROUNDS:
                 print("[Note: reached maximum tool rounds, response may be incomplete]", file=sys.stderr)
