@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from urllib.parse import urlparse
 
 import tornado.httpserver
 import tornado.ioloop
@@ -62,8 +63,6 @@ def _get_webhook_url() -> str:
     """Build the full GitHub webhook URL from the Telegram webhook base."""
     telegram_url = os.getenv("TELEGRAM_WEBHOOK_URL", "")
     if "://" in telegram_url:
-        # Extract scheme + host from the Telegram webhook URL
-        from urllib.parse import urlparse
         parsed = urlparse(telegram_url)
         base = f"{parsed.scheme}://{parsed.netloc}"
         return f"{base}{GITHUB_WEBHOOK_PATH}"
@@ -234,6 +233,8 @@ class TelegramWebhookHandler(tornado.web.RequestHandler):
             update = Update.de_json(data, self.tg_app.bot)
             # Queue the update for the Application to process
             await self.tg_app.update_queue.put(update)
+        except json.JSONDecodeError:
+            logger.warning("Failed to decode Telegram update JSON", exc_info=True)
         except Exception:
             logger.exception("Error processing Telegram update")
         self.set_status(200)
@@ -271,7 +272,8 @@ class GitHubWebhookHandler(tornado.web.RequestHandler):
         # For push events (and others), pull and restart
         if event == "push":
             try:
-                result = subprocess.run(
+                result = await asyncio.to_thread(
+                    subprocess.run,
                     ["git", "pull", "--ff-only"],
                     capture_output=True, text=True, timeout=30,
                     cwd=os.path.dirname(os.path.abspath(__file__)),
@@ -348,7 +350,6 @@ def run_telegram_bot(api_key: str) -> None:
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Derive the Telegram webhook path from the URL
-    from urllib.parse import urlparse
     tg_path = urlparse(webhook_url).path or "/telegram"
 
     # Build the tornado application with all routes
