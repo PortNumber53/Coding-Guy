@@ -252,6 +252,23 @@ def web(url: str, method: str = "GET", headers: dict | None = None,
         return json.dumps({"error": str(e)})
 
 
+def ask_ollama(prompt: str, model: str = "gemma4:e4b") -> str:
+    """Ask a local Ollama instance a question or to perform a task."""
+    url = "http://127.0.0.1:11434/api/generate"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=300)
+        resp.raise_for_status()
+        data = resp.json()
+        return json.dumps({"response": data.get("response", ""), "model": model})
+    except Exception as e:
+        return json.dumps({"error": f"Failed to call Ollama: {str(e)}"})
+
+
 # --- Tool definitions for the OpenAI-compatible tool-calling API ---
 
 TOOL_DEFINITIONS = [
@@ -538,6 +555,30 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_ollama",
+            "description": (
+                "Delegate a sub-task or ask a question to a local Ollama model. "
+                "Useful for text generation, summarizing, or analyzing data using a local open-source model."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The prompt or task instruction to send to Ollama."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "The Ollama model to use (default: gemma4:e4b)."
+                    }
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
 ]
 
 def _make_handler(func):
@@ -565,4 +606,5 @@ TOOL_HANDLERS = {
     "read_dockerfile": lambda args: read_dockerfile(),
     "write_dockerfile": _make_handler(write_dockerfile),
     "web": _make_handler(web),
+    "ask_ollama": _make_handler(ask_ollama),
 }
