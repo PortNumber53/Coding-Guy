@@ -1,11 +1,21 @@
-"""Telegram bot integration for the coding agent."""
+"""Telegram bot integration for the coding agent, with GitHub webhook support."""
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import os
+import signal
+import subprocess
 import sys
+import time
 from collections import defaultdict
+from urllib.parse import urlparse
 
+import tornado.httpserver
+import tornado.ioloop
+import tornado.web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -17,10 +27,17 @@ TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "21031"))
 PROGRESS_REPORT_INTERVAL = 3  # send a progress update every N tool rounds
 
+# GitHub webhook configuration
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+GITHUB_WEBHOOK_PATH = os.getenv("GITHUB_WEBHOOK_PATH", "/github-webhook")
+
 # Per-chat conversation history: chat_id -> list of message dicts
 _chat_histories: dict[int, list] = {}
 # Per-chat locks to serialize message processing
 _chat_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+# Server start time for /status
+_start_time: float = 0.0
 
 
 def split_message(text: str, max_len: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
@@ -42,11 +59,28 @@ def split_message(text: str, max_len: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list
     return chunks
 
 
+def _get_webhook_url() -> str:
+    """Build the full GitHub webhook URL from the Telegram webhook base."""
+    telegram_url = os.getenv("TELEGRAM_WEBHOOK_URL", "")
+    if "://" in telegram_url:
+        parsed = urlparse(telegram_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        return f"{base}{GITHUB_WEBHOOK_PATH}"
+    return f"http://your-server:{WEBHOOK_PORT}{GITHUB_WEBHOOK_PATH}"
+
+
+# ---------------------------------------------------------------------------
+# Telegram command handlers
+# ---------------------------------------------------------------------------
+
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
     await update.message.reply_text(
-        "Coding Agent ready. Send me a message and I'll help you with coding tasks.\n"
-        "Use /clear to reset the conversation."
+        "Coding Agent ready. Send me a message and I'll help you with coding tasks.\n\n"
+        "Commands:\n"
+        "/clear - Reset the conversation\n"
+        "/webhook - Show GitHub webhook configuration\n"
+        "/status - Show server status"
     )
 
 
@@ -56,6 +90,49 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _chat_histories.pop(chat_id, None)
     _chat_locks.pop(chat_id, None)
     await update.message.reply_text("Conversation cleared.")
+
+
+async def handle_webhook(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /webhook command — show GitHub webhook configuration."""
+    url = _get_webhook_url()
+    lines = [
+        "GitHub Webhook Configuration:",
+        f"  URL: {url}",
+        f"  Content type: application/json",
+        f"  Events: push (recommended)",
+        "",
+    ]
+    if GITHUB_WEBHOOK_SECRET:
+        lines.append("  Secret: configured")
+    else:
+        lines.append("  Secret: not configured (set GITHUB_WEBHOOK_SECRET env var)")
+
+    lines.extend([
+        "",
+        "When a push event is received, the server will:",
+        "  1. Verify the webhook signature (if secret is set)",
+        "  2. Run git pull to fetch the latest code",
+        "  3. Restart the server process",
+    ])
+    await update.message.reply_text("\n".join(lines))
+
+
+async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /status command — show server status."""
+    uptime_secs = int(time.time() - _start_time)
+    hours, remainder = divmod(uptime_secs, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{hours}h {minutes}m {seconds}s"
+
+    lines = [
+        f"Build: {COMMIT_HASH}",
+        f"Uptime: {uptime_str}",
+        f"Active chats: {len(_chat_histories)}",
+        f"Webhook port: {WEBHOOK_PORT}",
+        f"GitHub webhook: {GITHUB_WEBHOOK_PATH}",
+        f"GitHub secret: {'configured' if GITHUB_WEBHOOK_SECRET else 'not set'}",
+    ]
+    await update.message.reply_text("\n".join(lines))
 
 
 def make_progress_callback(chat, loop):
@@ -140,8 +217,109 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(chunk)
 
 
+# ---------------------------------------------------------------------------
+# Tornado request handlers
+# ---------------------------------------------------------------------------
+
+class TelegramWebhookHandler(tornado.web.RequestHandler):
+    """Handle incoming Telegram updates."""
+
+    def initialize(self, tg_app: Application) -> None:
+        self.tg_app = tg_app
+
+    async def post(self) -> None:
+        try:
+            data = json.loads(self.request.body)
+            update = Update.de_json(data, self.tg_app.bot)
+            # Queue the update for the Application to process
+            await self.tg_app.update_queue.put(update)
+        except json.JSONDecodeError:
+            logger.warning("Failed to decode Telegram update JSON", exc_info=True)
+        except Exception:
+            logger.exception("Error processing Telegram update")
+        self.set_status(200)
+        self.finish()
+
+
+class GitHubWebhookHandler(tornado.web.RequestHandler):
+    """Handle incoming GitHub webhook events."""
+
+    async def post(self) -> None:
+        # Verify HMAC signature if secret is configured
+        if GITHUB_WEBHOOK_SECRET:
+            signature = self.request.headers.get("X-Hub-Signature-256", "")
+            expected = "sha256=" + hmac.new(
+                GITHUB_WEBHOOK_SECRET.encode(),
+                self.request.body,
+                hashlib.sha256,
+            ).hexdigest()
+            if not hmac.compare_digest(signature, expected):
+                logger.warning("GitHub webhook: invalid signature")
+                self.set_status(403)
+                self.write({"error": "invalid signature"})
+                self.finish()
+                return
+
+        # Parse the event
+        event = self.request.headers.get("X-GitHub-Event", "unknown")
+        logger.info(f"GitHub webhook received: {event}")
+
+        if event == "ping":
+            self.write({"status": "pong"})
+            self.finish()
+            return
+
+        # For push events (and others), pull and restart
+        if event == "push":
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "pull", "--ff-only"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                )
+                pull_output = result.stdout.strip()
+                logger.info(f"git pull: {pull_output}")
+                if result.returncode != 0:
+                    logger.error(f"git pull stderr: {result.stderr.strip()}")
+            except Exception as e:
+                logger.error(f"git pull failed: {e}")
+                pull_output = f"error: {e}"
+
+            self.write({"status": "ok", "action": "restarting", "pull": pull_output})
+            self.finish()
+
+            # Schedule a graceful shutdown — the hot-reload watcher (or process
+            # manager) will restart the server with the new code.  If git pull
+            # changed files under .git the hot-reload watcher picks it up
+            # automatically.  We also send SIGTERM as a fallback for non-reload
+            # deployments.
+            loop = tornado.ioloop.IOLoop.current()
+            loop.call_later(1.0, lambda: os.kill(os.getpid(), signal.SIGTERM))
+            return
+
+        # Unhandled event types — just acknowledge
+        self.write({"status": "ok", "event": event, "action": "ignored"})
+        self.finish()
+
+
+class HealthHandler(tornado.web.RequestHandler):
+    """Simple health-check endpoint."""
+
+    def get(self) -> None:
+        self.write({"status": "ok", "build": COMMIT_HASH})
+        self.finish()
+
+
+# ---------------------------------------------------------------------------
+# Server startup
+# ---------------------------------------------------------------------------
+
 def run_telegram_bot(api_key: str) -> None:
-    """Start the Telegram bot webhook server."""
+    """Start the combined Telegram + GitHub webhook server."""
+    global _start_time
+    _start_time = time.time()
+
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         print("Error: TELEGRAM_BOT_TOKEN not found in environment or .env file.", file=sys.stderr)
@@ -151,7 +329,7 @@ def run_telegram_bot(api_key: str) -> None:
     if not webhook_url:
         print(
             "Error: TELEGRAM_WEBHOOK_URL not found. Set it to your public URL "
-            "(e.g. https://yourdomain.com/bot-webhook).",
+            "(e.g. https://yourdomain.com/telegram).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -161,18 +339,63 @@ def run_telegram_bot(api_key: str) -> None:
         level=logging.INFO,
     )
 
-    app = Application.builder().token(token).build()
-    app.bot_data["api_key"] = api_key
+    # Build the Telegram Application (but don't start its built-in server)
+    tg_app = Application.builder().token(token).build()
+    tg_app.bot_data["api_key"] = api_key
 
-    app.add_handler(CommandHandler("start", handle_start))
-    app.add_handler(CommandHandler("clear", handle_clear))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    tg_app.add_handler(CommandHandler("start", handle_start))
+    tg_app.add_handler(CommandHandler("clear", handle_clear))
+    tg_app.add_handler(CommandHandler("webhook", handle_webhook))
+    tg_app.add_handler(CommandHandler("status", handle_status))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print(f"Starting Telegram webhook server on 0.0.0.0:{WEBHOOK_PORT} [build {COMMIT_HASH}]", file=sys.stderr)
-    print(f"Webhook URL: {webhook_url}", file=sys.stderr)
+    # Derive the Telegram webhook path from the URL
+    tg_path = urlparse(webhook_url).path or "/telegram"
 
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=WEBHOOK_PORT,
-        webhook_url=webhook_url,
-    )
+    # Build the tornado application with all routes
+    tornado_app = tornado.web.Application([
+        (tg_path, TelegramWebhookHandler, {"tg_app": tg_app}),
+        (GITHUB_WEBHOOK_PATH, GitHubWebhookHandler),
+        (r"/health", HealthHandler),
+    ])
+
+    print(f"Starting webhook server on 0.0.0.0:{WEBHOOK_PORT} [build {COMMIT_HASH}]", file=sys.stderr)
+    print(f"  Telegram webhook: {webhook_url}", file=sys.stderr)
+    print(f"  GitHub webhook:   {_get_webhook_url()}", file=sys.stderr)
+    print(f"  Health check:     http://0.0.0.0:{WEBHOOK_PORT}/health", file=sys.stderr)
+
+    asyncio.run(_run_server(tg_app, tornado_app, webhook_url))
+
+
+async def _run_server(
+    tg_app: Application,
+    tornado_app: tornado.web.Application,
+    webhook_url: str,
+) -> None:
+    """Async entry point: initialise the Telegram app, start tornado, and
+    block until a shutdown signal is received."""
+
+    # Initialise and start the Telegram Application (processing pipeline)
+    await tg_app.initialize()
+    await tg_app.start()
+
+    # Register the webhook URL with Telegram's API
+    await tg_app.bot.set_webhook(url=webhook_url)
+
+    # Start the tornado HTTP server
+    server = tornado_app.listen(WEBHOOK_PORT, "0.0.0.0")
+
+    # Wait for shutdown signal
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, shutdown_event.set)
+
+    logger.info("Server is ready")
+
+    await shutdown_event.wait()
+
+    logger.info("Shutting down…")
+    server.stop()
+    await tg_app.stop()
+    await tg_app.shutdown()
