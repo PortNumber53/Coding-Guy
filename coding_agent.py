@@ -265,11 +265,28 @@ def main():
     parser = argparse.ArgumentParser(description="Coding agent powered by Nvidia API (Kimi K2.5)")
     parser.add_argument("--serve", action="store_true", help="Start Telegram bot webhook server")
     parser.add_argument(
+        "--reload", action="store_true",
+        help="Auto-restart the server when watched files change (use with --serve)",
+    )
+    parser.add_argument(
+        "--watch-path",
+        default=None,
+        help="Directory to watch for hot-reload (default: .git in current directory)",
+    )
+    parser.add_argument(
         "--workspace",
         default=DEFAULT_WORKSPACE,
         help="Workspace directory for the agent sandbox (default: %(default)s)",
     )
     args = parser.parse_args()
+
+    # Hot-reload mode: delegate to watcher which spawns the server as a child.
+    if args.serve and args.reload:
+        from hot_reload import run_with_reload
+
+        watch_path = args.watch_path or os.path.join(os.getcwd(), ".git")
+        extra_args = ["--workspace", args.workspace]
+        sys.exit(run_with_reload(watch_path, extra_args))
 
     api_key = get_api_key()
     conversation_history = []
