@@ -261,7 +261,7 @@ def ask_ollama(prompt: str, model: str = "gemma4:e4b") -> str:
         "stream": False
     }
     try:
-        resp = requests.post(url, json=payload, timeout=300)
+        resp = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=300)
         resp.raise_for_status()
         data = resp.json()
         return json.dumps({"response": data.get("response", ""), "model": model})
