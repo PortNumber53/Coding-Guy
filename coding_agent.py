@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -28,7 +29,23 @@ STATUS_COMPLETE = "complete"
 STATUS_MAX_ROUNDS = "max_rounds"
 STATUS_ERROR = "error"
 
-SYSTEM_PROMPT = """\
+
+def _get_commit_hash() -> str:
+    """Return the short git commit hash, or 'unknown' if unavailable."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+COMMIT_HASH = _get_commit_hash()
+
+SYSTEM_PROMPT = f"""\
+[build {COMMIT_HASH}] \
 You are an expert coding agent. All file operations execute inside a Docker sandbox \
 with the project directory mounted at /workspace. File paths are relative to the \
 project root.

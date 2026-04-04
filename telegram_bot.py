@@ -9,7 +9,7 @@ from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR
+from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, COMMIT_HASH
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ def run_telegram_bot(api_key: str) -> None:
     app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print(f"Starting Telegram webhook server on 0.0.0.0:{WEBHOOK_PORT}", file=sys.stderr)
+    print(f"Starting Telegram webhook server on 0.0.0.0:{WEBHOOK_PORT} [build {COMMIT_HASH}]", file=sys.stderr)
     print(f"Webhook URL: {webhook_url}", file=sys.stderr)
 
     app.run_webhook(
