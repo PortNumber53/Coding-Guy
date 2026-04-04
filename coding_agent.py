@@ -44,8 +44,7 @@ def _get_commit_hash() -> str:
 
 COMMIT_HASH = _get_commit_hash()
 
-SYSTEM_PROMPT = f"""\
-[build {COMMIT_HASH}] \
+SYSTEM_PROMPT = """\
 You are an expert coding agent. All file operations execute inside a Docker sandbox \
 with the project directory mounted at /workspace. File paths are relative to the \
 project root.

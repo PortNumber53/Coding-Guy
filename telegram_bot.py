@@ -133,7 +133,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": reply})
 
-        # Send reply, splitting if necessary
+        # Send reply, prefixed with build hash, splitting if necessary
+        reply = f"[build {COMMIT_HASH}]\n{reply}"
         for chunk in split_message(reply):
             if chunk.strip():
                 await update.message.reply_text(chunk)
