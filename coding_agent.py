@@ -295,6 +295,7 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
 def main():
     parser = argparse.ArgumentParser(description="Coding agent powered by Nvidia API (Kimi K2.5)")
     parser.add_argument("--serve", action="store_true", help="Start Telegram bot webhook server")
+    parser.add_argument("--slack", action="store_true", help="Start Slack bot server")
     parser.add_argument(
         "--reload", action="store_true",
         help="Auto-restart the server when watched files change (use with --serve)",
@@ -347,6 +348,14 @@ def main():
         from telegram_bot import run_telegram_bot
         try:
             run_telegram_bot(api_key, invoke_url, model_name)
+        finally:
+            docker.cleanup()
+        return
+
+    if args.slack:
+        from slack_bot import run_slack_bot
+        try:
+            run_slack_bot(api_key, invoke_url, model_name)
         finally:
             docker.cleanup()
         return
