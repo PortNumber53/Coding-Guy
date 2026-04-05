@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     python3 python3-pip python3-venv \\
     nodejs npm \\
     golang-go \\
-    git curl wget grep findutils \\
+    git curl wget grep findutils openssh-client \\
     build-essential \\
     && rm -rf /var/lib/apt/lists/*
 
@@ -42,6 +42,7 @@ class DockerManager:
         self.image_tag: str = IMAGE_NAME
         self.subprocess_timeout = subprocess_timeout
         self.startup_warnings: list[str] = []
+        self.ssh_mode: str = "none"  # "none", "agent", or "keys"
         atexit.register(self.cleanup)
 
     def _run(self, cmd: list[str], timeout: int | None = None, **kwargs) -> subprocess.CompletedProcess:
@@ -93,8 +94,26 @@ class DockerManager:
         print(f"  Image '{self.image_tag}' built successfully.", file=sys.stderr)
         return {"status": "built", "image": self.image_tag, "dockerfile": source}
 
+    def _detect_ssh(self) -> dict:
+        """Detect SSH availability on the host. Returns dict with mode and paths."""
+        ssh_auth_sock = os.getenv("SSH_AUTH_SOCK")
+        if ssh_auth_sock and os.path.exists(ssh_auth_sock):
+            return {"mode": "agent", "ssh_auth_sock": ssh_auth_sock}
+
+        ssh_dir = os.path.expanduser("~/.ssh")
+        if os.path.isdir(ssh_dir):
+            for name in ("id_ed25519", "id_rsa", "id_ecdsa"):
+                key_path = os.path.join(ssh_dir, name)
+                if os.path.isfile(key_path):
+                    return {"mode": "keys", "ssh_dir": ssh_dir}
+
+        return {"mode": "none"}
+
     def start_container(self) -> None:
         """Start a persistent container with work_dir mounted."""
+        ssh_info = self._detect_ssh()
+        self.ssh_mode = ssh_info["mode"]
+
         name = f"{CONTAINER_PREFIX}-{uuid.uuid4().hex[:8]}"
         cmd = [
             "docker", "run", "-d",
@@ -102,6 +121,17 @@ class DockerManager:
             "-v", f"{self.work_dir}:{MOUNT_TARGET}",
             "-w", MOUNT_TARGET,
         ]
+
+        # Mount SSH agent socket or SSH keys directory when available.
+        if self.ssh_mode == "agent":
+            host_sock = ssh_info["ssh_auth_sock"]
+            cmd.extend([
+                "-v", f"{host_sock}:/run/ssh-agent.sock:ro",
+                "-e", "SSH_AUTH_SOCK=/run/ssh-agent.sock",
+            ])
+        elif self.ssh_mode == "keys":
+            cmd.extend(["-v", f"{ssh_info['ssh_dir']}:/root/.ssh:ro"])
+
         # Forward optional env vars (e.g. GIT_TOKEN) into the container.
         for var in _ENV_FORWARD:
             val = os.getenv(var)
@@ -112,11 +142,12 @@ class DockerManager:
         if result.returncode != 0:
             raise RuntimeError(f"Container start failed:\n{result.stderr}")
         self.container_id = result.stdout.strip()
-        print(f"  Container started: {name}", file=sys.stderr)
+        print(f"  Container started: {name} (ssh: {self.ssh_mode})", file=sys.stderr)
         self._configure_git()
+        self._configure_ssh()
 
     def _configure_git(self) -> None:
-        """Set git identity inside the container when env vars are present."""
+        """Set git identity and credential helpers inside the container."""
         configs = {
             "user.name": os.getenv("GIT_USER_NAME"),
             "user.email": os.getenv("GIT_USER_EMAIL"),
@@ -131,6 +162,70 @@ class DockerManager:
                     msg = f"Failed to set git {key}: {result.stderr.strip()}"
                     print(f"  Warning: {msg}", file=sys.stderr)
                     self.startup_warnings.append(msg)
+
+        # When SSH is not available, rewrite SSH URLs to HTTPS using GIT_TOKEN.
+        if self.ssh_mode == "none":
+            self._try_configure_https_fallback()
+
+    def _try_configure_https_fallback(self) -> None:
+        """Configure HTTPS fallback if GIT_TOKEN is available."""
+        git_token = os.getenv("GIT_TOKEN")
+        if git_token:
+            self._configure_https_fallback(git_token)
+
+    def _configure_https_fallback(self, git_token: str) -> None:
+        """Set up git to rewrite SSH URLs to HTTPS and authenticate with a token."""
+        # Each provider requires a specific username for token-based auth.
+        host_credentials = {
+            "github.com": f"https://x-access-token:{git_token}@github.com",
+            "gitlab.com": f"https://oauth2:{git_token}@gitlab.com",
+            "bitbucket.org": f"https://x-token-auth:{git_token}@bitbucket.org",
+        }
+        for host in host_credentials:
+            # Rewrite git@host: → https://host/
+            self._run([
+                "docker", "exec", self.container_id,
+                "git", "config", "--global",
+                f"url.https://{host}/.insteadOf", f"git@{host}:",
+            ])
+        # Store credentials so the token is not exposed in remote URLs.
+        cred_lines = "\n".join(host_credentials.values()) + "\n"
+        self._run([
+            "docker", "exec", "-i", self.container_id,
+            "bash", "-c", "cat > /root/.git-credentials",
+        ], input=cred_lines)
+        self._run([
+            "docker", "exec", self.container_id,
+            "git", "config", "--global",
+            "credential.helper", "store --file=/root/.git-credentials",
+        ])
+
+    def _configure_ssh(self) -> None:
+        """Configure SSH inside the container based on detected mode."""
+        if self.ssh_mode == "none":
+            return
+
+        # Accept new host keys automatically (fresh container has no known_hosts).
+        self._run([
+            "docker", "exec", self.container_id,
+            "bash", "-c",
+            "mkdir -p /root/.ssh && printf '%s\\n' "
+            "'Host *' '    StrictHostKeyChecking accept-new' "
+            ">> /root/.ssh/config && chmod 600 /root/.ssh/config",
+        ])
+
+        if self.ssh_mode == "agent":
+            # Verify the forwarded agent is usable.
+            result = self._run([
+                "docker", "exec", self.container_id,
+                "ssh-add", "-l",
+            ])
+            if result.returncode != 0:
+                msg = "SSH agent forwarded but no keys accessible — falling back to HTTPS."
+                print(f"  Warning: {msg}", file=sys.stderr)
+                self.startup_warnings.append(msg)
+                self.ssh_mode = "none"
+                self._try_configure_https_fallback()
 
     def exec(self, cmd: list[str], stdin_data: str | None = None) -> tuple[int, str, str]:
         """Execute a command inside the container.

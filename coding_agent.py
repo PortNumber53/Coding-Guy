@@ -73,6 +73,12 @@ You have plenty of tool rounds available. Work through the entire task methodica
 explore, implement, verify, and fix issues until the task is truly complete. \
 If you encounter errors, debug and retry rather than giving up.
 
+When cloning repositories:
+- Both SSH URLs (git@host:owner/repo.git) and HTTPS URLs work automatically.
+- If SSH is not configured, SSH URLs are transparently rewritten to HTTPS.
+- If cloning fails with an authentication error, suggest the user check their \
+GIT_TOKEN or SSH key configuration.
+
 Use the tools provided to complete the user's request. Be precise with file paths \
 and edits. Prefer patch_file over write_file when modifying existing files.\
 """
@@ -98,6 +104,14 @@ def build_messages(conversation_history, user_input, docker_manager=None):
             "is a missing package (e.g. git). Update the Dockerfile and call "
             "rebuild_container, then retry the failed configuration."
         )
+    if docker_manager:
+        mode = docker_manager.ssh_mode
+        if mode == "agent":
+            system += "\n\nSSH mode: agent. SSH agent is forwarded from the host — SSH cloning works natively."
+        elif mode == "keys":
+            system += "\n\nSSH mode: keys. SSH keys are mounted from the host — SSH cloning works natively."
+        else:
+            system += "\n\nSSH mode: none. SSH URLs are automatically converted to HTTPS with token auth."
     messages = [{"role": "system", "content": system}]
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_input})
