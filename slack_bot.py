@@ -24,7 +24,7 @@ PROGRESS_REPORT_INTERVAL = 3  # send a progress update every N tool rounds
 # Per-channel conversation history: channel_id -> list of message dicts
 _channel_histories: dict[str, list] = {}
 # Per-channel locks to serialize message processing
-_channel_locks: dict[asyncio.Lock] = defaultdict(asyncio.Lock)
+_channel_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 # Server start time for status
 _start_time: float = 0.0
@@ -50,9 +50,8 @@ def split_message(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> list[str]:
 
 
 def format_slack_message(text: str) -> str:
-    """Format text for Slack, converting markdown and handling code blocks."""
-    # Replace triple backticks code blocks
-    text = re.sub(r'```(\w+)?\n(.*?)```', lambda m: f\"```{m.group(1) or ''}\n{m.group(2)}```\", text, flags=re.DOTALL)
+    """Format text for Slack, ensuring code blocks are preserved."""
+    # Code blocks are already in Slack-compatible format
     return text
 
 
@@ -130,6 +129,9 @@ class SlackBot:
             signing_secret=self.signing_secret,
         )
 
+        # Cached bot user ID (fetched on first mention)
+        self._bot_user_id: Optional[str] = None
+
         # Setup event handlers
         self._setup_handlers()
 
@@ -143,9 +145,10 @@ class SlackBot:
             user = event.get("user")
             text = event.get("text", "")
 
-            # Remove bot mention from text
-            bot_user_id = (await client.auth_test()).get("user_id", "")
-            text = re.sub(f"<@{bot_user_id}>", "", text).strip()
+            # Remove bot mention from text - fetch bot user ID once and cache it
+            if self._bot_user_id is None:
+                self._bot_user_id = (await client.auth_test()).get("user_id", "")
+            text = re.sub(f"<@{self._bot_user_id}>", "", text).strip()
 
             await self._process_message(channel_id, user, text, say)
 
@@ -160,14 +163,9 @@ class SlackBot:
             user = event.get("user")
             text = event.get("text", "")
 
-            # Check if this is a direct message (IM)
-            try:
-                channel_info = await client.conversations_info(channel=channel_id)
-                is_im = channel_info["channel"].get("is_im", False)
-                if not is_im:
-                    return  # Only process DMs, mentions are handled separately
-            except SlackApiError:
-                return
+            # Check if this is a direct message (IM) - check event payload first to avoid API call
+            if event.get("channel_type") != "im" and not channel_id.startswith("D"):
+                return    # Only process DMs, mentions are handled separately
 
             await self._process_message(channel_id, user, text, say)
 
@@ -232,9 +230,7 @@ class SlackBot:
 
             # Send typing indicator (https://api.slack.com/methods/users.setPresence)
             try:
-                await AsyncWebClient(token=self.bot_token).users_setPresence(
-                    presence="auto"
-                )
+                await self.app.client.users_setPresence(presence="auto")
             except Exception:
                 pass  # Typing indicator is best effort
 
@@ -288,7 +284,7 @@ class SlackBot:
             for chunk in split_message(formatted_reply):
                 if chunk.strip():
                     try:
-                        await say(text=chunk, mrkdwn=False)
+                        await say(text=chunk, mrkdwn=True)
                     except SlackApiError as e:
                         logger.error(f"Slack API error: {e}")
                         # Try sending without markdown if rich formatting fails
