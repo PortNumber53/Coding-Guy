@@ -276,7 +276,7 @@ class GitHubWebhookHandler(tornado.web.RequestHandler):
         if event == "push":
             try:
                 payload = json.loads(self.request.body)
-                ref = payload.get("ref", "")
+                ref = payload.get("ref", "") if isinstance(payload, dict) else ""
             except json.JSONDecodeError:
                 logger.warning("GitHub webhook: failed to decode push payload")
                 ref = ""
