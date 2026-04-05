@@ -272,8 +272,22 @@ class GitHubWebhookHandler(tornado.web.RequestHandler):
             self.finish()
             return
 
-        # For push events (and others), pull and restart
+        # Only handle push events (and only restart on master/main branch)
         if event == "push":
+            try:
+                payload = json.loads(self.request.body)
+                ref = payload.get("ref", "") if isinstance(payload, dict) else ""
+            except json.JSONDecodeError:
+                logger.warning("GitHub webhook: failed to decode push payload")
+                ref = ""
+
+            # Only restart for pushes to master or main branch
+            if ref not in ("refs/heads/master", "refs/heads/main"):
+                logger.info(f"GitHub webhook: ignoring push to {ref}")
+                self.write({"status": "ok", "event": event, "branch": ref, "action": "ignored"})
+                self.finish()
+                return
+
             try:
                 result = await asyncio.to_thread(
                     subprocess.run,
