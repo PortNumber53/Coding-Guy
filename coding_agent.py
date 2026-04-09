@@ -18,7 +18,7 @@ load_dotenv()
 
 INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 MODEL = "moonshotai/kimi-k2.5"
-MAX_TOOL_ROUNDS = 50
+MAX_TOOL_ROUNDS = 250
 
 # Dedicated workspace directory for the agent's Docker sandbox.
 DEFAULT_WORKSPACE = os.environ.get(
@@ -128,7 +128,7 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
     payload = {
         "model": model,
         "messages": messages,
-        "max_tokens": 16384,
+        "max_tokens": 32768,
         "temperature": 1.00,
         "top_p": 1.00,
         "stream": stream,
