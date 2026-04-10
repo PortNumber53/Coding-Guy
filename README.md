@@ -53,6 +53,19 @@ The agent includes built-in rate limiting to minimize 429 (Rate Limit) errors fr
 - **`token_bucket`**: Token bucket algorithm for burst handling.
 - **`none`**: Disables rate limiting entirely.
 
+You can also configure rate limiting via command-line arguments:
+
+```bash
+# Use fixed delay of 1 second between requests
+python coding_agent.py --rate-limit-strategy fixed --rate-limit-initial-delay 1.0
+
+# Use adaptive rate limiting with custom delays
+python coding_agent.py --rate-limit-strategy adaptive --rate-limit-initial-delay 0.5 --rate-limit-min-delay 0.2 --rate-limit-max-delay 30.0
+
+# Disable rate limiting
+python coding_agent.py --rate-limit-strategy none
+```
+
 ### Command Line (Interactive)
 ```bash
 python coding_agent.py

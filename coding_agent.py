@@ -343,6 +343,32 @@ def main():
     parser.add_argument("--ollama", action="store_true", help="Use local Ollama instead of Nvidia API")
     parser.add_argument("--model", type=str, help="Override the model to use (default: gemma4:e4b for Ollama)")
     parser.add_argument("--api-base", type=str, help="Override the API base URL")
+    # Rate limiting arguments
+    parser.add_argument(
+        "--rate-limit-strategy",
+        type=str,
+        choices=['adaptive', 'fixed', 'token_bucket', 'none'],
+        default=None,
+        help="Rate limiting strategy (overrides RATE_LIMIT_STRATEGY env var)"
+    )
+    parser.add_argument(
+        "--rate-limit-initial-delay",
+        type=float,
+        default=None,
+        help="Initial delay between requests in seconds (default: 0.5)"
+    )
+    parser.add_argument(
+        "--rate-limit-min-delay",
+        type=float,
+        default=None,
+        help="Minimum delay for adaptive rate limiting (default: 0.1)"
+    )
+    parser.add_argument(
+        "--rate-limit-max-delay",
+        type=float,
+        default=None,
+        help="Maximum delay for adaptive rate limiting (default: 60.0)"
+    )
     args = parser.parse_args()
 
     # Hot-reload mode: delegate to watcher which spawns the server as a child.
@@ -357,11 +383,23 @@ def main():
         sys.exit(run_with_reload(watch_path, extra_args))
 
     # Initialize rate limiter based on configuration
-    strategy = os.getenv("RATE_LIMIT_STRATEGY", DEFAULT_RATE_LIMIT_STRATEGY)
+    # Command line args take precedence over env vars
+    strategy = args.rate_limit_strategy
+    if strategy is None:
+        strategy = os.getenv("RATE_LIMIT_STRATEGY", DEFAULT_RATE_LIMIT_STRATEGY)
+    
     if strategy != 'none':
-        initial_delay = float(os.getenv("RATE_LIMIT_INITIAL_DELAY", DEFAULT_RATE_LIMIT_INITIAL_DELAY))
-        min_delay = float(os.getenv("RATE_LIMIT_MIN_DELAY", DEFAULT_RATE_LIMIT_MIN_DELAY))
-        max_delay = float(os.getenv("RATE_LIMIT_MAX_DELAY", DEFAULT_RATE_LIMIT_MAX_DELAY))
+        initial_delay = args.rate_limit_initial_delay
+        if initial_delay is None:
+            initial_delay = float(os.getenv("RATE_LIMIT_INITIAL_DELAY", DEFAULT_RATE_LIMIT_INITIAL_DELAY))
+        
+        min_delay = args.rate_limit_min_delay
+        if min_delay is None:
+            min_delay = float(os.getenv("RATE_LIMIT_MIN_DELAY", DEFAULT_RATE_LIMIT_MIN_DELAY))
+        
+        max_delay = args.rate_limit_max_delay
+        if max_delay is None:
+            max_delay = float(os.getenv("RATE_LIMIT_MAX_DELAY", DEFAULT_RATE_LIMIT_MAX_DELAY))
         
         limiter = init_global_limiter(
             strategy=strategy,
