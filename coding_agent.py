@@ -19,6 +19,12 @@ from rate_limiter import (
     init_global_limiter,
     get_global_limiter,
 )
+from api_key_pool import (
+    APIKeyPoolManager,
+    init_key_pool,
+    get_global_pool,
+    parse_api_keys_from_env,
+)
 
 load_dotenv()
 
@@ -97,12 +103,29 @@ and edits. Prefer patch_file over write_file when modifying existing files.\
 
 
 def get_api_key():
+    """Get an API key from the pool or environment."""
+    # First try the pool
+    pool = get_global_pool()
+    if pool:
+        key_obj = pool.select_key()
+        if key_obj:
+            return key_obj.key
+
+    # Fall back to single key
     key = os.getenv("NVIDIA_API_KEY")
     if not key:
-        print("Error: NVIDIA_API_KEY not found in environment or .env file.", file=sys.stderr)
-        print("Copy .env.example to .env and add your key.", file=sys.stderr)
+        print("Error: No API keys configured. Set NVIDIA_API_KEY or NVIDIA_API_KEYS in .env.", file=sys.stderr)
+        print("Copy .env.example to .env and add your key(s).", file=sys.stderr)
         sys.exit(1)
     return key
+
+
+def get_pool_key():
+    """Get a key object from the pool for tracking."""
+    pool = get_global_pool()
+    if pool:
+        return pool.select_key()
+    return None
 
 
 def build_messages(conversation_history, user_input, docker_manager=None):
@@ -133,6 +156,11 @@ def build_messages(conversation_history, user_input, docker_manager=None):
 def call_llm_api(messages, api_key, invoke_url, model, stream=True):
     """Call the Nvidia API. Returns the full response JSON (non-streamed) or
     the assembled message dict (streamed) including any tool_calls."""
+    # Get pool key for tracking
+    pool = get_global_pool()
+    pool_key = pool.select_key() if pool else None
+    actual_key = pool_key.key if pool_key else api_key
+    
     # Apply rate limiting before making the request
     limiter = get_global_limiter()
     if limiter:
@@ -141,7 +169,7 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
             print(f"[Rate limit] Waiting {waited:.2f}s before next request", file=sys.stderr)
     
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {actual_key}",
         "Accept": "text/event-stream" if stream else "application/json",
     }
     payload = {
@@ -155,12 +183,34 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
         "chat_template_kwargs": {"thinking": True},
     }
 
-    response = requests.post(invoke_url, headers=headers, json=payload, stream=stream, timeout=300)
-    response.raise_for_status()
+    try:
+        response = requests.post(invoke_url, headers=headers, json=payload, stream=stream, timeout=300)
+        response.raise_for_status()
+        
+        # Record successful request
+        tokens_used = 0  # We don't get token count from streaming
+        if pool_key:
+            pool_key.record_usage(tokens_used=tokens_used, success=True)
+        
+        # Record successful request for adaptive rate limiting
+        if limiter:
+            limiter.record_success()
     
-    # Record successful request for adaptive rate limiting
-    if limiter:
-        limiter.record_success()
+    except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        # Record failure for pool key
+        is_http_error = isinstance(e, requests.exceptions.HTTPError)
+        status_code = e.response.status_code if is_http_error and e.response is not None else 0
+        
+        if pool_key:
+            if status_code == 429:
+                pool_key.record_rate_limit_hit(status_code=status_code)
+                if limiter:
+                    limiter.record_rate_limit_hit()
+                print(f"[Pool] Key {pool_key.name} hit rate limit, recorded cooldown", file=sys.stderr)
+            else:
+                pool_key.record_usage(tokens_used=0, success=False)
+        
+        raise
 
     if not stream:
         data = response.json()
@@ -412,6 +462,18 @@ def main():
             print(f"  Initial delay: {initial_delay}s, Min: {min_delay}s, Max: {max_delay}s", file=sys.stderr)
     else:
         print("Rate limiting disabled", file=sys.stderr)
+    
+    # Initialize API key pool if multiple keys configured
+    api_keys = parse_api_keys_from_env()
+    if len(api_keys) > 1:
+        try:
+            key_pool = init_key_pool(
+                keys=api_keys,
+                cooldown_duration=float(os.getenv("API_KEY_COOLDOWN", "60.0"))
+            )
+            print(f"API key pool initialized with {len(api_keys)} keys", file=sys.stderr)
+        except ValueError as e:
+            print(f"Warning: Failed to initialize key pool: {e}", file=sys.stderr)
     
     if args.ollama:
         invoke_url = args.api_base or "http://127.0.0.1:11434/v1/chat/completions"
