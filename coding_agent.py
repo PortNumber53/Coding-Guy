@@ -386,20 +386,20 @@ def main():
     # Command line args take precedence over env vars
     strategy = args.rate_limit_strategy
     if strategy is None:
-        strategy = os.getenv("RATE_LIMIT_STRATEGY", DEFAULT_RATE_LIMIT_STRATEGY)
+        strategy = DEFAULT_RATE_LIMIT_STRATEGY
     
     if strategy != 'none':
         initial_delay = args.rate_limit_initial_delay
         if initial_delay is None:
-            initial_delay = float(os.getenv("RATE_LIMIT_INITIAL_DELAY", DEFAULT_RATE_LIMIT_INITIAL_DELAY))
+            initial_delay = DEFAULT_RATE_LIMIT_INITIAL_DELAY
         
         min_delay = args.rate_limit_min_delay
         if min_delay is None:
-            min_delay = float(os.getenv("RATE_LIMIT_MIN_DELAY", DEFAULT_RATE_LIMIT_MIN_DELAY))
+            min_delay = DEFAULT_RATE_LIMIT_MIN_DELAY
         
         max_delay = args.rate_limit_max_delay
         if max_delay is None:
-            max_delay = float(os.getenv("RATE_LIMIT_MAX_DELAY", DEFAULT_RATE_LIMIT_MAX_DELAY))
+            max_delay = DEFAULT_RATE_LIMIT_MAX_DELAY
         
         limiter = init_global_limiter(
             strategy=strategy,

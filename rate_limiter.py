@@ -7,7 +7,7 @@ errors by throttling API requests and respecting rate limits.
 import time
 import threading
 from typing import Optional
-from collections import deque
+
 
 
 class TokenBucketRateLimiter:
@@ -219,7 +219,7 @@ class RateLimitManager:
             raise ValueError(f"Unknown strategy: {strategy}. "
                            f"Available: {list(self.STRATEGIES.keys())}")
         
-        if strategy == 'none' or self.STRATEGIES[strategy] is None:
+        if strategy == 'none' or RateLimitManager.STRATEGIES[strategy] is None:
             self._limiter = None
         else:
             self._limiter = self.STRATEGIES[strategy](**kwargs)
