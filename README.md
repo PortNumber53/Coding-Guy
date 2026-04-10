@@ -37,23 +37,36 @@ https://build.nvidia.com/moonshotai/kimi-k2.5
 
 ## Rate Limiting
 
-The agent includes built-in rate limiting to minimize 429 (Rate Limit) errors from the LLM API. Configure via environment variables:
+The agent includes built-in rate limiting to minimize 429 (Rate Limit) errors from the LLM API. This is particularly important when making multiple sequential requests or using the agent interactively.
+
+### Rate Limiting Strategies
+
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| **`adaptive`** (default) | Automatically adjusts delay based on 429 errors. Increases delay after rate limit hits, decreases on success. | Best for most use cases - balances performance and reliability |
+| **`fixed`** | Enforces a constant delay between requests. | Predictable timing, good for batch operations |
+| **`token_bucket`** | Token bucket algorithm allows request bursts. | Good when you need occasional bursts of requests |
+| **`none`** | Disables rate limiting entirely. | Not recommended - will likely hit 429 errors |
+
+### Configuration via Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `RATE_LIMIT_STRATEGY` | Rate limiting strategy: `adaptive`, `fixed`, `token_bucket`, or `none` | `adaptive` |
 | `RATE_LIMIT_INITIAL_DELAY` | Initial delay between requests in seconds | `0.5` |
-| `RATE_LIMIT_MIN_DELAY` | Minimum delay (for adaptive strategy) | `0.1` |
-| `RATE_LIMIT_MAX_DELAY` | Maximum delay (for adaptive strategy) | `60.0` |
+| `RATE_LIMIT_MIN_DELAY` | Minimum delay (adaptive only) | `0.1` |
+| `RATE_LIMIT_MAX_DELAY` | Maximum delay (adaptive only) | `60.0` |
 
-### Rate Limiting Strategies
+### Command-Line Arguments
 
-- **`adaptive`** (default): Automatically adjusts delay based on 429 errors. Starts at `INITIAL_DELAY` and increases after 429s, decreasing slowly on success.
-- **`fixed`**: Enforces a constant delay between requests (uses `INITIAL_DELAY`).
-- **`token_bucket`**: Token bucket algorithm for burst handling.
-- **`none`**: Disables rate limiting entirely.
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--rate-limit-strategy` | Choose rate limiting strategy | `--rate-limit-strategy fixed` |
+| `--rate-limit-initial-delay` | Initial delay between requests (seconds) | `--rate-limit-initial-delay 1.0` |
+| `--rate-limit-min-delay` | Minimum delay for adaptive mode (seconds) | `--rate-limit-min-delay 0.2` |
+| `--rate-limit-max-delay` | Maximum delay for adaptive mode (seconds) | `--rate-limit-max-delay 30.0` |
 
-You can also configure rate limiting via command-line arguments:
+### Usage Examples
 
 ```bash
 # Use fixed delay of 1 second between requests
@@ -62,9 +75,29 @@ python coding_agent.py --rate-limit-strategy fixed --rate-limit-initial-delay 1.
 # Use adaptive rate limiting with custom delays
 python coding_agent.py --rate-limit-strategy adaptive --rate-limit-initial-delay 0.5 --rate-limit-min-delay 0.2 --rate-limit-max-delay 30.0
 
-# Disable rate limiting
+# Disable rate limiting entirely (not recommended)
 python coding_agent.py --rate-limit-strategy none
+
+# Use token bucket for burst-friendly operations
+python coding_agent.py --rate-limit-strategy token_bucket
+
+# Configure for Slack bot with conservative limits
+python coding_agent.py --slack --rate-limit-strategy adaptive --rate-limit-initial-delay 1.0
+
+# Configure for Telegram bot with aggressive limits
+python coding_agent.py --serve --rate-limit-strategy adaptive --rate-limit-initial-delay 0.5 --rate-limit-min-delay 0.1
 ```
+
+### Rate Limiting Output
+
+When rate limiting is active, you'll see messages in stderr:
+
+```
+[Rate limit] Waiting 0.50s before next request
+[Rate limit] Recorded 429 error. Adaptive delay may increase.
+```
+
+The agent will automatically handle retries for 429 errors with exponential backoff.
 
 ### Command Line (Interactive)
 ```bash
