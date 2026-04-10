@@ -230,7 +230,7 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
     for round_num in range(effective_max):
         print("\nAssistant: " if round_num == 0 else "", end="", flush=True, file=sys.stderr)
 
-        max_retries = 4
+        max_retries = 5
         for attempt in range(max_retries + 1):
             try:
                 assistant_msg = call_llm_api(messages, api_key, invoke_url, model, stream=True)
@@ -245,7 +245,7 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
                 )
 
                 if is_retryable and attempt < max_retries:
-                    wait = 2 ** (attempt + 1)
+                    wait = 10 ** (attempt + 1)
                     error_type = status_code if is_http_error else "Connection"
                     print(f"\nAPI error ({error_type}), retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
                     time.sleep(wait)
