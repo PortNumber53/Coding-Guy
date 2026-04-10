@@ -245,7 +245,7 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
                 )
 
                 if is_retryable and attempt < max_retries:
-                    wait = 10 ** (attempt + 1)
+                    wait = 10 * (attempt + 1)
                     error_type = status_code if is_http_error else "Connection"
                     print(f"\nAPI error ({error_type}), retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
                     time.sleep(wait)
