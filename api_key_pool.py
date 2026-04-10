@@ -12,6 +12,13 @@ from typing import List, Optional, Dict, Any
 from collections import deque
 
 
+# Use monotonic time for all duration measurements
+# This is not affected by system clock adjustments (NTP, etc.)
+def _monotonic_now() -> float:
+    """Get current monotonic time for duration measurements."""
+    return time.monotonic()
+
+
 @dataclass
 class UsageRecord:
     """A single API usage record."""
@@ -55,7 +62,7 @@ class APIKey:
     cooldown_duration: float = 60.0  # Seconds to cool down after rate limit
     usage_window_seconds: float = 60.0  # Time window for active usage tracking
     
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     
     def __post_init__(self):
         self.current_usage_window = []
@@ -66,7 +73,7 @@ class APIKey:
         """Check if this key is available for use (not in cooldown)."""
         with self._lock:
             if self.in_cooldown:
-                if time.time() >= self.cooldown_until:
+                if _monotonic_now() >= self.cooldown_until:
                     self.in_cooldown = False
                     self.consecutive_429s = 0
                     return True
@@ -80,11 +87,11 @@ class APIKey:
         Based on number of requests in the usage window.
         """
         with self._lock:
-            now = time.time()
+            current_time = _monotonic_now()
             # Clean old records
             self.current_usage_window = [
                 r for r in self.current_usage_window
-                if now - r.timestamp < self.usage_window_seconds
+                if current_time - r.timestamp < self.usage_window_seconds
             ]
             return float(len(self.current_usage_window))
     
@@ -99,11 +106,11 @@ class APIKey:
                 return 0.0
             
             penalty = 0.0
-            now = time.time()
+            current_time = _monotonic_now()
             
             # Penalty for recent rate limit events (exponential decay)
             for event in self.rate_limit_events:
-                age = now - event.timestamp
+                age = current_time - event.timestamp
                 if age < 300:  # Within 5 minutes
                     penalty += 100.0 * (1 - age / 300)
             
@@ -126,7 +133,7 @@ class APIKey:
             self.total_requests += 1
             self.total_tokens += tokens_used
             self.current_usage_window.append(UsageRecord(
-                timestamp=time.time(),
+                timestamp=_monotonic_now(),
                 tokens_used=tokens_used,
                 success=success
             ))
@@ -137,23 +144,29 @@ class APIKey:
     def record_rate_limit_hit(self, status_code: int = 429) -> None:
         """Record a rate limit error for this key."""
         with self._lock:
+            current_time = _monotonic_now()
             self.rate_limit_events.append(RateLimitEvent(
-                timestamp=time.time(),
+                timestamp=current_time,
                 status_code=status_code
             ))
             self.consecutive_429s += 1
-            self.last_rate_limit_time = time.time()
+            self.last_rate_limit_time = current_time
             
             # Enter cooldown if multiple consecutive 429s
             if self.consecutive_429s >= 2:
                 self.in_cooldown = True
                 # Exponential backoff: 60s, 120s, 240s, etc.
                 cooldown = self.cooldown_duration * (2 ** (self.consecutive_429s - 2))
-                self.cooldown_until = time.time() + min(cooldown, 600)  # Max 10 min
+                self.cooldown_until = current_time + min(cooldown, 600)  # Max 10 min
     
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics for this key."""
         with self._lock:
+            cooldown_remaining = None
+            if self.in_cooldown:
+                remaining = self.cooldown_until - _monotonic_now()
+                cooldown_remaining = max(0, remaining) if remaining > 0 else None
+            
             return {
                 "name": self.name,
                 "total_requests": self.total_requests,
@@ -162,7 +175,7 @@ class APIKey:
                 "rate_limit_events": len(self.rate_limit_events),
                 "consecutive_429s": self.consecutive_429s,
                 "in_cooldown": self.in_cooldown,
-                "cooldown_until": self.cooldown_until if self.in_cooldown else None,
+                "cooldown_remaining_sec": cooldown_remaining,
                 "selection_score": self.selection_score,
             }
 
