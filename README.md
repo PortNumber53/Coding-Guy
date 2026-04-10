@@ -11,6 +11,7 @@ An AI-powered coding agent that integrates with Telegram and Slack, powered by N
 - 🔧 Multiple tools: file operations, command execution, web requests, and more
 - 🔄 Hot-reload for development
 - ⏰ Rate limiting to minimize 429 errors from the LLM API
+- 🔑 API Key Pool for load balancing across multiple keys with automatic cooldown
 
 ## Quick Start
 
@@ -34,6 +35,57 @@ cp .env.example .env
 
 Get your free key here:
 https://build.nvidia.com/moonshotai/kimi-k2.5
+
+## API Key Pool
+
+The agent supports using multiple API keys for load balancing and improved reliability. When multiple keys are configured, the agent automatically:
+
+- **Selects the key with the lowest current usage** for each request
+- **Tracks rate limit hits independently** for each key
+- **Cools down keys** that hit rate limits (configurable duration)
+- **Automatically recovers** keys after cooldown period
+
+### Configuration Methods
+
+Choose one of these methods to configure multiple keys:
+
+**Method 1: Comma-separated list**
+```env
+NVIDIA_API_KEYS=key1,key2,key3
+```
+
+**Method 2: Numbered keys** (any number of keys)
+```env
+NVIDIA_API_KEY_0=your-first-api-key
+NVIDIA_API_KEY_1=your-second-api-key
+NVIDIA_API_KEY_2=your-third-api-key
+```
+
+**Method 3: Single key** (backward compatible)
+```env
+NVIDIA_API_KEY=your-api-key
+```
+
+### API Key Pool Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `API_KEY_COOLDOWN` | Seconds to cooldown a key after rate limit hit | `60` |
+
+### Key Health Monitoring
+
+When a key hits a rate limit (429 error), it enters cooldown mode:
+
+- **First rate limit**: Key continues to be used but is flagged
+- **Consecutive rate limits**: Key enters cooldown with exponential backoff
+- **Cooldown period**: 60s, 120s, 240s, etc. (max 10 minutes)
+- **Auto-recovery**: Key becomes available again after cooldown
+
+You'll see messages like:
+```
+[Pool] Key key_1 hit rate limit, recorded cooldown
+API key pool initialized with 3 keys
+```
 
 ## Rate Limiting
 
