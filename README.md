@@ -10,6 +10,7 @@ An AI-powered coding agent that integrates with Telegram and Slack, powered by N
 - 🐳 Docker sandbox for safe code execution
 - 🔧 Multiple tools: file operations, command execution, web requests, and more
 - 🔄 Hot-reload for development
+- ⏰ Rate limiting to minimize 429 errors from the LLM API
 
 ## Quick Start
 
@@ -34,7 +35,23 @@ cp .env.example .env
 Get your free key here:
 https://build.nvidia.com/moonshotai/kimi-k2.5
 
-## Usage Modes
+## Rate Limiting
+
+The agent includes built-in rate limiting to minimize 429 (Rate Limit) errors from the LLM API. Configure via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RATE_LIMIT_STRATEGY` | Rate limiting strategy: `adaptive`, `fixed`, `token_bucket`, or `none` | `adaptive` |
+| `RATE_LIMIT_INITIAL_DELAY` | Initial delay between requests in seconds | `0.5` |
+| `RATE_LIMIT_MIN_DELAY` | Minimum delay (for adaptive strategy) | `0.1` |
+| `RATE_LIMIT_MAX_DELAY` | Maximum delay (for adaptive strategy) | `60.0` |
+
+### Rate Limiting Strategies
+
+- **`adaptive`** (default): Automatically adjusts delay based on 429 errors. Starts at `INITIAL_DELAY` and increases after 429s, decreasing slowly on success.
+- **`fixed`**: Enforces a constant delay between requests (uses `INITIAL_DELAY`).
+- **`token_bucket`**: Token bucket algorithm for burst handling.
+- **`none`**: Disables rate limiting entirely.
 
 ### Command Line (Interactive)
 ```bash
