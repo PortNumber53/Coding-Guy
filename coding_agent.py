@@ -13,12 +13,24 @@ from dotenv import load_dotenv
 
 from docker_manager import DockerManager
 from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, set_docker_manager
+from rate_limiter import (
+    RateLimitManager,
+    AdaptiveRateLimiter,
+    init_global_limiter,
+    get_global_limiter,
+)
 
 load_dotenv()
 
 INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 MODEL = "moonshotai/kimi-k2.5"
 MAX_TOOL_ROUNDS = 250
+
+# Rate limiting configuration
+DEFAULT_RATE_LIMIT_STRATEGY = os.getenv("RATE_LIMIT_STRATEGY", "adaptive")
+DEFAULT_RATE_LIMIT_INITIAL_DELAY = float(os.getenv("RATE_LIMIT_INITIAL_DELAY", "0.5"))
+DEFAULT_RATE_LIMIT_MIN_DELAY = float(os.getenv("RATE_LIMIT_MIN_DELAY", "0.1"))
+DEFAULT_RATE_LIMIT_MAX_DELAY = float(os.getenv("RATE_LIMIT_MAX_DELAY", "60.0"))
 
 # Dedicated workspace directory for the agent's Docker sandbox.
 DEFAULT_WORKSPACE = os.environ.get(
@@ -121,6 +133,13 @@ def build_messages(conversation_history, user_input, docker_manager=None):
 def call_llm_api(messages, api_key, invoke_url, model, stream=True):
     """Call the Nvidia API. Returns the full response JSON (non-streamed) or
     the assembled message dict (streamed) including any tool_calls."""
+    # Apply rate limiting before making the request
+    limiter = get_global_limiter()
+    if limiter:
+        waited = limiter.wait_if_needed()
+        if waited > 0:
+            print(f"[Rate limit] Waiting {waited:.2f}s before next request", file=sys.stderr)
+    
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Accept": "text/event-stream" if stream else "application/json",
@@ -138,6 +157,10 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
 
     response = requests.post(invoke_url, headers=headers, json=payload, stream=stream, timeout=300)
     response.raise_for_status()
+    
+    # Record successful request for adaptive rate limiting
+    if limiter:
+        limiter.record_success()
 
     if not stream:
         data = response.json()
@@ -226,6 +249,7 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
     messages = build_messages(conversation_history, user_input, docker_manager)
     effective_max = MAX_TOOL_ROUNDS if max_rounds is None else max_rounds
     assistant_msg = {}
+    limiter = get_global_limiter()
 
     for round_num in range(effective_max):
         print("\nAssistant: " if round_num == 0 else "", end="", flush=True, file=sys.stderr)
@@ -248,6 +272,12 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
                     wait = 10 * (attempt + 1)
                     error_type = status_code if is_http_error else "Connection"
                     print(f"\nAPI error ({error_type}), retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                    
+                    # Record rate limit hit for adaptive rate limiting
+                    if status_code == 429 and limiter:
+                        limiter.record_rate_limit_hit()
+                        print(f"[Rate limit] Recorded 429 error. Adaptive delay may increase.", file=sys.stderr)
+                    
                     time.sleep(wait)
                 elif not is_retryable:
                     print(f"\nAPI error: {e}", file=sys.stderr)
@@ -313,6 +343,32 @@ def main():
     parser.add_argument("--ollama", action="store_true", help="Use local Ollama instead of Nvidia API")
     parser.add_argument("--model", type=str, help="Override the model to use (default: gemma4:e4b for Ollama)")
     parser.add_argument("--api-base", type=str, help="Override the API base URL")
+    # Rate limiting arguments
+    parser.add_argument(
+        "--rate-limit-strategy",
+        type=str,
+        choices=['adaptive', 'fixed', 'token_bucket', 'none'],
+        default=None,
+        help="Rate limiting strategy (overrides RATE_LIMIT_STRATEGY env var)"
+    )
+    parser.add_argument(
+        "--rate-limit-initial-delay",
+        type=float,
+        default=None,
+        help="Initial delay between requests in seconds (default: 0.5)"
+    )
+    parser.add_argument(
+        "--rate-limit-min-delay",
+        type=float,
+        default=None,
+        help="Minimum delay for adaptive rate limiting (default: 0.1)"
+    )
+    parser.add_argument(
+        "--rate-limit-max-delay",
+        type=float,
+        default=None,
+        help="Maximum delay for adaptive rate limiting (default: 60.0)"
+    )
     args = parser.parse_args()
 
     # Hot-reload mode: delegate to watcher which spawns the server as a child.
@@ -326,6 +382,37 @@ def main():
         if args.api_base: extra_args.extend(["--api-base", args.api_base])
         sys.exit(run_with_reload(watch_path, extra_args))
 
+    # Initialize rate limiter based on configuration
+    # Command line args take precedence over env vars
+    strategy = args.rate_limit_strategy
+    if strategy is None:
+        strategy = DEFAULT_RATE_LIMIT_STRATEGY
+    
+    if strategy != 'none':
+        initial_delay = args.rate_limit_initial_delay
+        if initial_delay is None:
+            initial_delay = DEFAULT_RATE_LIMIT_INITIAL_DELAY
+        
+        min_delay = args.rate_limit_min_delay
+        if min_delay is None:
+            min_delay = DEFAULT_RATE_LIMIT_MIN_DELAY
+        
+        max_delay = args.rate_limit_max_delay
+        if max_delay is None:
+            max_delay = DEFAULT_RATE_LIMIT_MAX_DELAY
+        
+        limiter = init_global_limiter(
+            strategy=strategy,
+            initial_delay=initial_delay,
+            min_delay=min_delay,
+            max_delay=max_delay
+        )
+        print(f"Rate limiting enabled: {strategy} strategy", file=sys.stderr)
+        if isinstance(limiter._limiter, AdaptiveRateLimiter):
+            print(f"  Initial delay: {initial_delay}s, Min: {min_delay}s, Max: {max_delay}s", file=sys.stderr)
+    else:
+        print("Rate limiting disabled", file=sys.stderr)
+    
     if args.ollama:
         invoke_url = args.api_base or "http://127.0.0.1:11434/v1/chat/completions"
         model_name = args.model or "gemma4:e4b"

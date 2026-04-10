@@ -10,6 +10,7 @@ An AI-powered coding agent that integrates with Telegram and Slack, powered by N
 - 🐳 Docker sandbox for safe code execution
 - 🔧 Multiple tools: file operations, command execution, web requests, and more
 - 🔄 Hot-reload for development
+- ⏰ Rate limiting to minimize 429 errors from the LLM API
 
 ## Quick Start
 
@@ -34,7 +35,69 @@ cp .env.example .env
 Get your free key here:
 https://build.nvidia.com/moonshotai/kimi-k2.5
 
-## Usage Modes
+## Rate Limiting
+
+The agent includes built-in rate limiting to minimize 429 (Rate Limit) errors from the LLM API. This is particularly important when making multiple sequential requests or using the agent interactively.
+
+### Rate Limiting Strategies
+
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| **`adaptive`** (default) | Automatically adjusts delay based on 429 errors. Increases delay after rate limit hits, decreases on success. | Best for most use cases - balances performance and reliability |
+| **`fixed`** | Enforces a constant delay between requests. | Predictable timing, good for batch operations |
+| **`token_bucket`** | Token bucket algorithm allows request bursts. | Good when you need occasional bursts of requests |
+| **`none`** | Disables rate limiting entirely. | Not recommended - will likely hit 429 errors |
+
+### Configuration via Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RATE_LIMIT_STRATEGY` | Rate limiting strategy: `adaptive`, `fixed`, `token_bucket`, or `none` | `adaptive` |
+| `RATE_LIMIT_INITIAL_DELAY` | Initial delay between requests in seconds | `0.5` |
+| `RATE_LIMIT_MIN_DELAY` | Minimum delay (adaptive only) | `0.1` |
+| `RATE_LIMIT_MAX_DELAY` | Maximum delay (adaptive only) | `60.0` |
+
+### Command-Line Arguments
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--rate-limit-strategy` | Choose rate limiting strategy | `--rate-limit-strategy fixed` |
+| `--rate-limit-initial-delay` | Initial delay between requests (seconds) | `--rate-limit-initial-delay 1.0` |
+| `--rate-limit-min-delay` | Minimum delay for adaptive mode (seconds) | `--rate-limit-min-delay 0.2` |
+| `--rate-limit-max-delay` | Maximum delay for adaptive mode (seconds) | `--rate-limit-max-delay 30.0` |
+
+### Usage Examples
+
+```bash
+# Use fixed delay of 1 second between requests
+python coding_agent.py --rate-limit-strategy fixed --rate-limit-initial-delay 1.0
+
+# Use adaptive rate limiting with custom delays
+python coding_agent.py --rate-limit-strategy adaptive --rate-limit-initial-delay 0.5 --rate-limit-min-delay 0.2 --rate-limit-max-delay 30.0
+
+# Disable rate limiting entirely (not recommended)
+python coding_agent.py --rate-limit-strategy none
+
+# Use token bucket for burst-friendly operations
+python coding_agent.py --rate-limit-strategy token_bucket
+
+# Configure for Slack bot with conservative limits
+python coding_agent.py --slack --rate-limit-strategy adaptive --rate-limit-initial-delay 1.0
+
+# Configure for Telegram bot with aggressive limits
+python coding_agent.py --serve --rate-limit-strategy adaptive --rate-limit-initial-delay 0.5 --rate-limit-min-delay 0.1
+```
+
+### Rate Limiting Output
+
+When rate limiting is active, you'll see messages in stderr:
+
+```
+[Rate limit] Waiting 0.50s before next request
+[Rate limit] Recorded 429 error. Adaptive delay may increase.
+```
+
+The agent will automatically handle retries for 429 errors with exponential backoff.
 
 ### Command Line (Interactive)
 ```bash
