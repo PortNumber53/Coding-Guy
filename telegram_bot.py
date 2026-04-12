@@ -232,9 +232,11 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             data = json.loads(json_data)
             settings = data.get("settings", [])
             # Keep truncating until it fits
+            truncated = False
             while len(json.dumps(data, indent=2)) > 2900 and settings:
                 settings.pop()
-            data["truncated"] = True
+                truncated = True
+            data["truncated"] = truncated
             data["total_settings"] = len(db.get_all_settings())
             json_data = json.dumps(data, indent=2)
         await update.message.reply_text(f"<pre>{json_data}</pre>", parse_mode="HTML")
@@ -279,16 +281,18 @@ def make_progress_callback(chat, loop):
 
 async def _track_task(coro):
     """Track a coroutine as an active task for graceful shutdown."""
-    task = asyncio.create_task(coro)
+    task = asyncio.current_task()
     _active_tasks.add(task)
     try:
-        await task
+        await coro
     finally:
         _active_tasks.discard(task)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming text messages."""
+    if _shutdown_event.is_set():
+        return
     # Wrap the actual message handling in a task for tracking
     await _track_task(_handle_message_impl(update, context))
 
