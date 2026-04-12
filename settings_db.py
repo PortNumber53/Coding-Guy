@@ -87,7 +87,8 @@ class SettingsDatabase:
     
     def _init_db(self):
         """Initialize the database schema."""
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
@@ -115,6 +116,8 @@ class SettingsDatabase:
                 CREATE INDEX IF NOT EXISTS idx_settings_history_key ON settings_history(key)
             """)
             conn.commit()
+        finally:
+            conn.close()
     
     def _serialize_value(self, value: Any, value_type: str) -> str:
         """Serialize a value based on its type."""
@@ -159,7 +162,8 @@ class SettingsDatabase:
         serialized = self._serialize_value(value, value_type)
         now = datetime.now(timezone.utc).isoformat()
         
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             # Get old value for history
             old_row = conn.execute(
                 "SELECT value FROM settings WHERE key = ?",
@@ -211,7 +215,8 @@ class SettingsDatabase:
         Returns:
             Setting value or default
         """
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             row = conn.execute(
                 "SELECT value, value_type FROM settings WHERE key = ?",
                 (key,)
@@ -220,6 +225,8 @@ class SettingsDatabase:
             if row:
                 return self._deserialize_value(row["value"], row["value_type"])
             return default
+        finally:
+            conn.close()
     
     def get_setting(self, key: str) -> Optional[Setting]:
         """Get full setting object including metadata.
@@ -230,7 +237,8 @@ class SettingsDatabase:
         Returns:
             Setting object or None
         """
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             row = conn.execute(
                 "SELECT * FROM settings WHERE key = ?",
                 (key,)
@@ -247,6 +255,8 @@ class SettingsDatabase:
                     updated_at=row["updated_at"]
                 )
             return None
+        finally:
+            conn.close()
     
     def get_all(self, category: Optional[str] = None) -> Dict[str, Any]:
         """Get all settings, optionally filtered by category.
@@ -257,7 +267,8 @@ class SettingsDatabase:
         Returns:
             Dictionary of key-value pairs
         """
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             if category:
                 rows = conn.execute(
                     "SELECT key, value, value_type FROM settings WHERE category = ? ORDER BY key",
@@ -272,6 +283,8 @@ class SettingsDatabase:
                 row["key"]: self._deserialize_value(row["value"], row["value_type"])
                 for row in rows
             }
+        finally:
+            conn.close()
     
     def get_all_settings(self, category: Optional[str] = None) -> List[Setting]:
         """Get full setting objects.
@@ -282,7 +295,8 @@ class SettingsDatabase:
         Returns:
             List of Setting objects
         """
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             if category:
                 rows = conn.execute(
                     "SELECT * FROM settings WHERE category = ? ORDER BY key",
@@ -305,6 +319,8 @@ class SettingsDatabase:
                 )
                 for row in rows
             ]
+        finally:
+            conn.close()
     
     def delete(self, key: str) -> bool:
         """Delete a setting.
@@ -315,10 +331,13 @@ class SettingsDatabase:
         Returns:
             True if setting existed and was deleted
         """
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             cursor = conn.execute("DELETE FROM settings WHERE key = ?", (key,))
             conn.commit()
             return cursor.rowcount > 0
+        finally:
+            conn.close()
     
     def get_categories(self) -> List[str]:
         """Get all unique categories.
@@ -326,11 +345,14 @@ class SettingsDatabase:
         Returns:
             List of category names
         """
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             rows = conn.execute(
                 "SELECT DISTINCT category FROM settings ORDER BY category"
             ).fetchall()
             return [row[0] for row in rows]
+        finally:
+            conn.close()
     
     def get_history(self, key: str, limit: int = 10) -> List[Dict]:
         """Get change history for a setting.
@@ -342,7 +364,8 @@ class SettingsDatabase:
         Returns:
             List of history entries
         """
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             rows = conn.execute("""
                 SELECT key, old_value, new_value, changed_at
                 FROM settings_history
@@ -360,6 +383,8 @@ class SettingsDatabase:
                 }
                 for row in rows
             ]
+        finally:
+            conn.close()
     
     def export_to_json(self, category: Optional[str] = None) -> str:
         """Export settings to JSON format.
@@ -417,7 +442,8 @@ class SettingsDatabase:
         Returns:
             Dictionary with statistics
         """
-        with self._get_connection() as conn:
+        conn = self._get_connection()
+        try:
             total = conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0]
             categories = conn.execute("SELECT COUNT(DISTINCT category) FROM settings").fetchone()[0]
             history = conn.execute("SELECT COUNT(*) FROM settings_history").fetchone()[0]
@@ -436,6 +462,8 @@ class SettingsDatabase:
                 "by_category": {row[0]: row[1] for row in category_counts},
                 "database_path": self.db_path
             }
+        finally:
+            conn.close()
 
 
 # Global instance for convenience
