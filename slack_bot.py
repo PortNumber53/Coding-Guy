@@ -15,6 +15,7 @@ from slack_sdk.web.async_internal_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
 
 from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, COMMIT_HASH
+from settings_db import get_settings_db, init_default_settings
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +166,7 @@ class SlackBot:
 
             # Check if this is a direct message (IM) - check event payload first to avoid API call
             if event.get("channel_type") != "im" and not channel_id.startswith("D"):
-                return    # Only process DMs, mentions are handled separately
+                return  # Only process DMs, mentions are handled separately
 
             await self._process_message(channel_id, user, text, say)
 
@@ -190,14 +191,105 @@ class SlackBot:
                 minutes, seconds = divmod(remainder, 60)
                 uptime_str = f"{hours}h {minutes}m {seconds}s"
 
+                # Get settings db stats
+                db_stats = get_settings_db().get_stats()
+
                 status_text = (
                     f"*Coding Guy Status*\n"
                     f"• Build: `{COMMIT_HASH}`\n"
                     f"• Uptime: {uptime_str}\n"
                     f"• Active conversations: {len(_channel_histories)}\n"
-                    f"• Model: `{self.model}`"
+                    f"• Model: `{self.model}`\n"
+                    f"• Settings: {db_stats.get('total_settings', 0)} settings, {db_stats.get('total_categories', 0)} categories"
                 )
                 await say(text=status_text, mrkdwn=True)
+                return
+
+            if text.lower().startswith("settings"):
+                db = get_settings_db()
+                parts = text.split()
+                args = parts[1:]
+
+                if not args:
+                    cats = db.get_categories()
+                    lines = ["*Settings Categories*"]
+                    for cat in cats:
+                        settings = db.get_all(category=cat)
+                        lines.append(f"• {cat}: {len(settings)} setting(s)")
+                    lines.extend(["", "Use `/coding-guy settings list [category]` or `/coding-guy settings get <key>`"])
+                    await say(text="\n".join(lines), mrkdwn=True)
+                    return
+
+                subcommand = args[0].lower() if args else ""
+
+                if subcommand == "get" and len(args) >= 2:
+                    key = args[1]
+                    setting = db.get_setting(key)
+                    if setting:
+                        text = f"*{key}*\n• Value: `{setting.value}`\n• Type: {setting.value_type}\n• Category: {setting.category}" + (f"\n• Description: {setting.description}" if setting.description else "")
+                        await say(text=text, mrkdwn=True)
+                    else:
+                        await say(text=f"Setting '{key}' not found.", mrkdwn=True)
+                    return
+
+                if subcommand == "list":
+                    category = args[1] if len(args) > 1 else None
+                    settings = db.get_all(category=category)
+                    if not settings:
+                        await say(text=f"No settings found" + (f" in category '{category}'" if category else ""), mrkdwn=True)
+                        return
+                    lines = [f"*Settings*" + (f" (category: {category})" if category else "")]
+                    for key, val in list(settings.items())[:15]:  # Limit to 15
+                        lines.append(f"• `{key}`: {val}")
+                    if len(settings) > 15:
+                        lines.append(f"• ... and {len(settings) - 15} more")
+                    await say(text="\n".join(lines), mrkdwn=True)
+                    return
+
+                if subcommand == "set" and len(args) >= 3:
+                    key = args[1]
+                    value = " ".join(args[2:])
+                    # Try to infer type
+                    value_type = "string"
+                    if value.lower() in ("true", "false"):
+                        value_type = "boolean"
+                        value = value.lower() == "true"
+                    elif value.isdigit():
+                        value_type = "integer"
+                        value = int(value)
+                    elif "." in value:
+                        try:
+                            value = float(value)
+                            value_type = "float"
+                        except ValueError:
+                            pass
+                    db.set(key, value, value_type)
+                    await say(text=f"*Set* `{key}` = `{value}` (type: {value_type})", mrkdwn=True)
+                    return
+
+                if subcommand == "categories":
+                    cats = db.get_categories()
+                    if cats:
+                        await say(text="*Categories:* " + ", ".join(f"`{c}`" for c in cats), mrkdwn=True)
+                    else:
+                        await say(text="No categories found.", mrkdwn=True)
+                    return
+
+                if subcommand == "export":
+                    json_data = db.export_to_json()
+                    # Truncate if too long - ensure valid JSON by parsing and re-serializing
+                    if len(json_data) > 3500:
+                        data = json.loads(json_data)
+                        settings = data.get("settings", [])
+                        while len(json.dumps(data, indent=2)) > 3400 and settings:
+                            settings.pop()
+                            data["truncated"] = True
+                            data["total_settings"] = len(db.get_all_settings())
+                        json_data = json.dumps(data, indent=2)
+                    await say(text=f"```json\n{json_data}\n```", mrkdwn=True)
+                    return
+
+                await say(text="Unknown subcommand. Try: `list [category]`, `get <key>`, `set <key> <value>`, `categories`, `export`", mrkdwn=True)
                 return
 
             if text.lower() == "help" or not text:
@@ -207,6 +299,7 @@ class SlackBot:
                     "• `/coding-guy <question>` - Ask me anything about coding\n"
                     "• `/coding-guy clear` - Reset the conversation\n"
                     "• `/coding-guy status` - Show server status\n"
+                    "• `/coding-guy settings` - Manage settings\n"
                     "• `/coding-guy help` - Show this help message\n\n"
                     "• *DM me* for private conversations\n"
                     "• *Mention me* (@Coding Guy) in channels"
@@ -294,6 +387,10 @@ class SlackBot:
         """Start the Slack bot with socket mode."""
         global _start_time
         _start_time = asyncio.get_event_loop().time()
+
+        # Initialize settings database with defaults
+        init_default_settings()
+        logger.info(f"Settings DB initialized with {get_settings_db().get_stats().get('total_settings', 0)} settings")
 
         logging.basicConfig(
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
