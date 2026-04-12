@@ -202,7 +202,9 @@ class SettingsDatabase:
             })
             
             conn.commit()
-        
+        finally:
+            conn.close()
+
         return True
     
     def get(self, key: str, default: Any = None) -> Optional[Any]:
