@@ -32,12 +32,10 @@ for FILE in $STAGED_PY_FILES; do
         echo "  Checking: $FILE"
         
         # Use python -m py_compile to check syntax
-        python3 -m py_compile "$FILE" 2>/dev/null
-        
-        if [ $? -ne 0 ]; then
+        # Use python -m py_compile to check syntax
+        if ! OUTPUT=$(python3 -m py_compile "$FILE" 2>&1); then
             echo "    ❌ Syntax error detected in $FILE!"
-            # Show the actual error
-            python3 -m py_compile "$FILE"
+            echo "$OUTPUT"
             SYNTAX_ERRORS=$((SYNTAX_ERRORS + 1))
         else
             echo "    ✅ Syntax OK"
