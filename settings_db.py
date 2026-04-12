@@ -61,6 +61,30 @@ class SettingsDatabase:
         conn.row_factory = sqlite3.Row
         return conn
     
+    def _execute_query(self, query: str, params: tuple = ()):
+        """Execute a query with proper connection closing."""
+        conn = self._get_connection()
+        try:
+            return conn.execute(query, params)
+        finally:
+            conn.close()
+    
+    def _execute_query_fetchall(self, query: str, params: tuple = ()):
+        """Execute a query and fetch all results with proper connection closing."""
+        conn = self._get_connection()
+        try:
+            return conn.execute(query, params).fetchall()
+        finally:
+            conn.close()
+    
+    def _execute_query_fetchone(self, query: str, params: tuple = ()):
+        """Execute a query and fetch one result with proper connection closing."""
+        conn = self._get_connection()
+        try:
+            return conn.execute(query, params).fetchone()
+        finally:
+            conn.close()
+    
     def _init_db(self):
         """Initialize the database schema."""
         with self._get_connection() as conn:
@@ -479,7 +503,7 @@ DEFAULT_SETTINGS = {
     
     # API settings
     ("api.timeout", 300, "integer", CATEGORY_API, "API request timeout in seconds"),
-    ("api.max_retries", 5, "integer", "Maximum API retry attempts"),
+    ("api.max_retries", 5, "integer", CATEGORY_API, "Maximum API retry attempts"),
     ("api.stream_by_default", True, "boolean", CATEGORY_API, "Stream responses by default"),
     
     # UI settings

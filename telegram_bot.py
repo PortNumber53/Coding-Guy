@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "21031"))
-PROGRESS_REPORT_INTERVAL = 3  # send a progress update every N tool rounds
+PROGRESS_REPORT_INTERVAL = 3 # send a progress update every N tool rounds
 
 # GitHub webhook configuration
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
@@ -194,9 +194,12 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif value.isdigit():
             value_type = "integer"
             value = int(value)
-        elif value.replace(".", "").isdigit():
-            value_type = "float"
-            value = float(value)
+        elif "." in value:
+            try:
+                value = float(value)
+                value_type = "float"
+            except ValueError:
+                pass
 
         db.set(key, value, value_type)
         await update.message.reply_text(f"Set '{key}' = {value} (type: {value_type})")
@@ -220,9 +223,16 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif subcommand == "export":
         json_data = db.export_to_json()
-        # Truncate if too long
+        # Truncate if too long - ensure valid JSON structure
         if len(json_data) > 3000:
-            json_data = json_data[:3000] + "\n... (truncated)"
+            data = json.loads(json_data)
+            settings = data.get("settings", [])
+            # Keep truncating until it fits
+            while len(json.dumps(data, indent=2)) > 2900 and settings:
+                settings.pop()
+                data["truncated"] = True
+                data["total_settings"] = len(db.get_all_settings())
+            json_data = json.dumps(data, indent=2)
         await update.message.reply_text(f"```json\n{json_data}\n```", parse_mode="Markdown")
 
     else:
@@ -519,7 +529,7 @@ async def _run_server(
 
     await shutdown_event.wait()
 
-    logger.info("Shutting down…")
+    logger.info("Shutting down\u2026")
     server.stop()
     await tg_app.stop()
     await tg_app.shutdown()

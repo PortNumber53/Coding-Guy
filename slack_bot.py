@@ -205,9 +205,10 @@ class SlackBot:
                 await say(text=status_text, mrkdwn=True)
                 return
 
-            if text.lower() == "settings":
+            if text.lower().startswith("settings"):
                 db = get_settings_db()
-                args = text.split()[1:] if len(text.split()) > 1 else []
+                parts = text.split()
+                args = parts[1:]
 
                 if not args:
                     cats = db.get_categories()
@@ -245,7 +246,50 @@ class SlackBot:
                     await say(text="\n".join(lines), mrkdwn=True)
                     return
 
-                await say(text="Unknown subcommand. Try `list`, `get <key>`, `set <key> <value>`", mrkdwn=True)
+                if subcommand == "set" and len(args) >= 3:
+                    key = args[1]
+                    value = " ".join(args[2:])
+                    # Try to infer type
+                    value_type = "string"
+                    if value.lower() in ("true", "false"):
+                        value_type = "boolean"
+                        value = value.lower() == "true"
+                    elif value.isdigit():
+                        value_type = "integer"
+                        value = int(value)
+                    elif "." in value:
+                        try:
+                            value = float(value)
+                            value_type = "float"
+                        except ValueError:
+                            pass
+                    db.set(key, value, value_type)
+                    await say(text=f"*Set* `{key}` = `{value}` (type: {value_type})", mrkdwn=True)
+                    return
+
+                if subcommand == "categories":
+                    cats = db.get_categories()
+                    if cats:
+                        await say(text="*Categories:* " + ", ".join(f"`{c}`" for c in cats), mrkdwn=True)
+                    else:
+                        await say(text="No categories found.", mrkdwn=True)
+                    return
+
+                if subcommand == "export":
+                    json_data = db.export_to_json()
+                    # Truncate if too long - ensure valid JSON
+                    if len(json_data) > 3500:
+                        data = json.loads(json_data)
+                        settings = data.get("settings", [])
+                        while len(json.dumps(data, indent=2)) > 3400 and settings:
+                            settings.pop()
+                            data["truncated"] = True
+                            data["total_settings"] = len(db.get_all_settings())
+                        json_data = json.dumps(data, indent=2)
+                    await say(text=f"```json\n{json_data}\n```", mrkdwn=True)
+                    return
+
+                await say(text="Unknown subcommand. Try `list`, `get <key>`, `set <key> <value>`, `categories`, `export`", mrkdwn=True)
                 return
 
             if text.lower() == "help" or not text:
