@@ -87,6 +87,60 @@ You'll see messages like:
 API key pool initialized with 3 keys
 ```
 
+## Settings Database
+
+The agent uses SQLite to store application settings with full support for queryable, categorized configuration. This replaces scattered environment variables with a persistent, type-safe settings API.
+
+### Features
+
+- **Persistent storage** - SQLite database survives restarts
+- **Type-safe values** - Support for string, integer, float, boolean, and JSON types
+- **Categorized organization** - Group settings by category (agent, telegram, slack, docker, api, ui)
+- **Change history** - Track all setting modifications over time
+- **Import/Export** - JSON format for backup and migration
+- **Bot integration** - Access settings via `/settings` command in Telegram and Slack
+
+### Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CODING_GUY_SETTINGS_DB` | Path to SQLite database file | `~/coding-guy-workspace/settings.db` |
+
+### Telegram Commands
+
+- `/settings` - Show categories and usage
+- `/settings get <key>` - Get a specific setting
+- `/settings set <key> <value>` - Set a setting (auto-detects type)
+- `/settings list [category]` - List all settings
+- `/settings categories` - List all categories
+- `/settings export` - Export as JSON
+
+### Slack Commands
+
+- `/coding-guy settings` - Show categories
+- `/coding-guy settings list [category]` - List settings
+- `/coding-guy settings get <key>` - Get a specific setting
+
+### Usage in Code
+
+```python
+from settings_db import get_settings_db, set_setting, get_setting
+
+# Initialize with defaults
+from settings_db import init_default_settings
+init_default_settings()
+
+# Set a value
+db = get_settings_db()
+db.set("agent.max_rounds", 500, "integer", "agent", "Maximum tool rounds per request")
+
+# Get a value
+value = db.get("agent.max_rounds", default=250)
+
+# Get all in category
+settings = db.get_all(category="telegram")
+```
+
 ## Rate Limiting
 
 The agent includes built-in rate limiting to minimize 429 (Rate Limit) errors from the LLM API. This is particularly important when making multiple sequential requests or using the agent interactively.
@@ -229,11 +283,13 @@ The agent has access to these tools:
 - `/clear` - Reset conversation
 - `/webhook` - Show GitHub webhook configuration
 - `/status` - Server status
+- `/settings` - Manage settings (get, set, list, export)
 
 ### Slack Commands
 - `/coding-guy <question>` - Ask a coding question
 - `/coding-guy clear` - Reset conversation
 - `/coding-guy status` - Show server status
+- `/coding-guy settings` - Manage settings (list, get)
 - `/coding-guy help` - Show help
 
 You can also:

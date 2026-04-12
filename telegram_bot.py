@@ -20,6 +20,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, COMMIT_HASH
+from settings_db import get_settings_db, init_default_settings, CATEGORY_AGENT, CATEGORY_TELEGRAM
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,8 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Commands:\n"
         "/clear - Reset the conversation\n"
         "/webhook - Show GitHub webhook configuration\n"
-        "/status - Show server status"
+        "/status - Show server status\n"
+        "/settings - Show/manage settings"
     )
 
 
@@ -93,7 +95,7 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_webhook(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /webhook command — show GitHub webhook configuration."""
+    """Handle /webhook command - show GitHub webhook configuration."""
     url = _get_webhook_url()
     lines = [
         "GitHub Webhook Configuration:",
@@ -118,11 +120,14 @@ async def handle_webhook(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /status command — show server status."""
+    """Handle /status command - show server status."""
     uptime_secs = int(time.time() - _start_time)
     hours, remainder = divmod(uptime_secs, 3600)
     minutes, seconds = divmod(remainder, 60)
     uptime_str = f"{hours}h {minutes}m {seconds}s"
+
+    # Get settings db stats
+    db_stats = get_settings_db().get_stats()
 
     lines = [
         f"Build: {COMMIT_HASH}",
@@ -131,8 +136,104 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Webhook port: {WEBHOOK_PORT}",
         f"GitHub webhook: {GITHUB_WEBHOOK_PATH}",
         f"GitHub secret: {'configured' if GITHUB_WEBHOOK_SECRET else 'not set'}",
+        f"Settings DB: {db_stats['total_settings']} settings, {db_stats['total_categories']} categories",
     ]
     await update.message.reply_text("\n".join(lines))
+
+
+async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /settings command - show or modify settings."""
+    db = get_settings_db()
+    args = context.args or []
+
+    if not args:
+        # Show categories overview
+        categories = db.get_categories()
+        lines = ["Settings Categories:"]
+        for cat in categories:
+            settings = db.get_all(category=cat)
+            lines.append(f"  {cat}: {len(settings)} setting(s)")
+        lines.extend([
+            "",
+            "Usage:",
+            "/settings get <key> - Get a specific setting",
+            "/settings set <key> <value> - Set a setting",
+            "/settings list [category] - List settings in category",
+            "/settings categories - List all categories",
+            "/settings export - Export all settings as JSON",
+        ])
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    subcommand = args[0].lower()
+
+    if subcommand == "get" and len(args) >= 2:
+        key = args[1]
+        setting = db.get_setting(key)
+        if setting:
+            lines = [
+                f"Key: {setting.key}",
+                f"Value: {setting.value}",
+                f"Type: {setting.value_type}",
+                f"Category: {setting.category}",
+                f"Description: {setting.description}",
+                f"Updated: {setting.updated_at}",
+            ]
+            await update.message.reply_text("\n".join(lines))
+        else:
+            await update.message.reply_text(f"Setting '{key}' not found.")
+
+    elif subcommand == "set" and len(args) >= 3:
+        key = args[1]
+        value = " ".join(args[2:])
+        # Try to infer type
+        value_type = "string"
+        if value.lower() in ("true", "false"):
+            value_type = "boolean"
+            value = value.lower() == "true"
+        elif value.isdigit():
+            value_type = "integer"
+            value = int(value)
+        elif value.replace(".", "").isdigit():
+            value_type = "float"
+            value = float(value)
+
+        db.set(key, value, value_type)
+        await update.message.reply_text(f"Set '{key}' = {value} (type: {value_type})")
+
+    elif subcommand == "list":
+        category = args[1] if len(args) > 1 else None
+        settings = db.get_all(category=category)
+        if not settings:
+            await update.message.reply_text(f"No settings found" + (f" in category '{category}'" if category else ""))
+            return
+        lines = [f"Settings:" + (f" (category: {category})" if category else "")]
+        for key, val in list(settings.items())[:20]:  # Limit to 20
+            lines.append(f"  {key}: {val}")
+        if len(settings) > 20:
+            lines.append(f"  ... and {len(settings) - 20} more")
+        await update.message.reply_text("\n".join(lines))
+
+    elif subcommand == "categories":
+        cats = db.get_categories()
+        await update.message.reply_text("Categories: " + ", ".join(cats) if cats else "No categories")
+
+    elif subcommand == "export":
+        json_data = db.export_to_json()
+        # Truncate if too long
+        if len(json_data) > 3000:
+            json_data = json_data[:3000] + "\n... (truncated)"
+        await update.message.reply_text(f"```json\n{json_data}\n```", parse_mode="Markdown")
+
+    else:
+        await update.message.reply_text(
+            "Unknown subcommand. Usage:\n"
+            "/settings get <key>\n"
+            "/settings set <key> <value>\n"
+            "/settings list [category]\n"
+            "/settings categories\n"
+            "/settings export"
+        )
 
 
 def make_progress_callback(chat, loop):
@@ -306,16 +407,16 @@ class GitHubWebhookHandler(tornado.web.RequestHandler):
             self.write({"status": "ok", "action": "restarting", "pull": pull_output})
             self.finish()
 
-            # Schedule a graceful shutdown — the hot-reload watcher (or process
-            # manager) will restart the server with the new code.  If git pull
+            # Schedule a graceful shutdown - the hot-reload watcher (or process
+            # manager) will restart the server with the new code. If git pull
             # changed files under .git the hot-reload watcher picks it up
-            # automatically.  We also send SIGTERM as a fallback for non-reload
+            # automatically. We also send SIGTERM as a fallback for non-reload
             # deployments.
             loop = tornado.ioloop.IOLoop.current()
             loop.call_later(1.0, lambda: os.kill(os.getpid(), signal.SIGTERM))
             return
 
-        # Unhandled event types — just acknowledge
+        # Unhandled event types - just acknowledge
         self.write({"status": "ok", "event": event, "action": "ignored"})
         self.finish()
 
@@ -365,6 +466,7 @@ def run_telegram_bot(api_key: str, invoke_url: str, model: str) -> None:
     tg_app.add_handler(CommandHandler("clear", handle_clear))
     tg_app.add_handler(CommandHandler("webhook", handle_webhook))
     tg_app.add_handler(CommandHandler("status", handle_status))
+    tg_app.add_handler(CommandHandler("settings", handle_settings))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Derive the Telegram webhook path from the URL
@@ -379,8 +481,8 @@ def run_telegram_bot(api_key: str, invoke_url: str, model: str) -> None:
 
     print(f"Starting webhook server on 0.0.0.0:{WEBHOOK_PORT} [build {COMMIT_HASH}]", file=sys.stderr)
     print(f"  Telegram webhook: {webhook_url}", file=sys.stderr)
-    print(f"  GitHub webhook:   {_get_webhook_url()}", file=sys.stderr)
-    print(f"  Health check:     http://0.0.0.0:{WEBHOOK_PORT}/health", file=sys.stderr)
+    print(f"  GitHub webhook: {_get_webhook_url()}", file=sys.stderr)
+    print(f"  Health check: http://0.0.0.0:{WEBHOOK_PORT}/health", file=sys.stderr)
 
     asyncio.run(_run_server(tg_app, tornado_app, webhook_url))
 
@@ -390,8 +492,12 @@ async def _run_server(
     tornado_app: tornado.web.Application,
     webhook_url: str,
 ) -> None:
-    """Async entry point: initialise the Telegram app, start tornado, and
+    """Async entry point: initialise the Telegram Application, start tornado, and
     block until a shutdown signal is received."""
+
+    # Initialize settings database with defaults
+    init_default_settings()
+    logger.info(f"Settings DB initialized with {get_settings_db().get_stats()['total_settings']} settings")
 
     # Initialise and start the Telegram Application (processing pipeline)
     await tg_app.initialize()
