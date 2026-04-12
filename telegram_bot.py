@@ -37,6 +37,10 @@ _chat_histories: dict[int, list] = {}
 # Per-chat locks to serialize message processing
 _chat_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+# Track active message processing tasks for graceful shutdown
+_active_tasks: set[asyncio.Task] = set()
+_shutdown_event: asyncio.Event = asyncio.Event()
+
 # Server start time for /status
 _start_time: float = 0.0
 
@@ -228,10 +232,12 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             data = json.loads(json_data)
             settings = data.get("settings", [])
             # Keep truncating until it fits
+            truncated = False
             while len(json.dumps(data, indent=2)) > 2900 and settings:
                 settings.pop()
-                data["truncated"] = True
-                data["total_settings"] = len(db.get_all_settings())
+                truncated = True
+            data["truncated"] = truncated
+            data["total_settings"] = len(db.get_all_settings())
             json_data = json.dumps(data, indent=2)
         await update.message.reply_text(f"<pre>{json_data}</pre>", parse_mode="HTML")
 
@@ -273,8 +279,26 @@ def make_progress_callback(chat, loop):
     return callback
 
 
+async def _track_task(coro):
+    """Track a coroutine as an active task for graceful shutdown."""
+    task = asyncio.current_task()
+    _active_tasks.add(task)
+    try:
+        await coro
+    finally:
+        _active_tasks.discard(task)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming text messages."""
+    if _shutdown_event.is_set():
+        return
+    # Wrap the actual message handling in a task for tracking
+    await _track_task(_handle_message_impl(update, context))
+
+
+async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Actual implementation of message handling."""
     chat_id = update.effective_chat.id
     lock = _chat_locks[chat_id]
 
@@ -529,7 +553,22 @@ async def _run_server(
 
     await shutdown_event.wait()
 
-    logger.info("Shutting down\u2026")
+    logger.info("Shutting down...")
+    # Signal shutdown to prevent new tasks
+    _shutdown_event.set()
+
+    # Wait for active message processing tasks to complete (with timeout)
+    if _active_tasks:
+        logger.info(f"Waiting for {len(_active_tasks)} active task(s) to complete...")
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*_active_tasks, return_exceptions=True),
+                timeout=30.0
+            )
+            logger.info("All active tasks completed")
+        except asyncio.TimeoutError:
+            logger.warning("Timeout waiting for tasks to complete, forcing shutdown")
+
     server.stop()
     await tg_app.stop()
     await tg_app.shutdown()

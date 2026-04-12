@@ -84,11 +84,13 @@ def run_with_reload(watch_path: str, extra_args: list[str] | None = None) -> int
             observer.stop()
             observer.join()
 
-        # Change detected — terminate the running server and restart.
+        # Change detected - terminate the running server and restart.
         print("[hot-reload] Change detected, restarting server…", file=sys.stderr)
         proc.terminate()
         try:
-            proc.wait(timeout=5)
+            # Give more time for graceful shutdown - allow Telegram messages to complete
+            proc.wait(timeout=35)
         except subprocess.TimeoutExpired:
+            print("[hot-reload] Graceful shutdown timed out, force killing...", file=sys.stderr)
             proc.kill()
             proc.wait()
