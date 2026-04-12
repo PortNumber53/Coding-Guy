@@ -277,7 +277,7 @@ class SlackBot:
 
                 if subcommand == "export":
                     json_data = db.export_to_json()
-                    # Truncate if too long - ensure valid JSON
+                    # Truncate if too long - ensure valid JSON by parsing and re-serializing
                     if len(json_data) > 3500:
                         data = json.loads(json_data)
                         settings = data.get("settings", [])
@@ -289,7 +289,7 @@ class SlackBot:
                     await say(text=f"```json\n{json_data}\n```", mrkdwn=True)
                     return
 
-                await say(text="Unknown subcommand. Try `list`, `get <key>`, `set <key> <value>`, `categories`, `export`", mrkdwn=True)
+                await say(text="Unknown subcommand. Try: `list [category]`, `get <key>`, `set <key> <value>`, `categories`, `export`", mrkdwn=True)
                 return
 
             if text.lower() == "help" or not text:

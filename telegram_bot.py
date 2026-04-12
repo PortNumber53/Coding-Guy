@@ -233,7 +233,7 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 data["truncated"] = True
                 data["total_settings"] = len(db.get_all_settings())
             json_data = json.dumps(data, indent=2)
-        await update.message.reply_text(f"```json\n{json_data}\n```", parse_mode="Markdown")
+        await update.message.reply_text(f"<pre>{json_data}</pre>", parse_mode="HTML")
 
     else:
         await update.message.reply_text(

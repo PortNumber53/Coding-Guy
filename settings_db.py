@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 
@@ -157,7 +157,7 @@ class SettingsDatabase:
             True if successful
         """
         serialized = self._serialize_value(value, value_type)
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         with self._get_connection() as conn:
             # Get old value for history
@@ -372,7 +372,7 @@ class SettingsDatabase:
         """
         settings_list = self.get_all_settings(category)
         data = {
-            "exported_at": datetime.now().isoformat(),
+            "exported_at": datetime.now(timezone.utc).isoformat(),
             "category": category,
             "settings": [s.to_dict() for s in settings_list]
         }
