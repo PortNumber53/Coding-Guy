@@ -19,18 +19,26 @@ DEBOUNCE_SECONDS = 2
 
 
 class _ReloadHandler(FileSystemEventHandler):
-    """Sets a flag when any file system event is detected."""
+    """Sets a flag when file system activity has settled."""
 
     def __init__(self):
         self.triggered = False
-        self._last_event_time = 0
+        self._last_activity = 0
 
     def on_any_event(self, event):
-        now = time.monotonic()
-        if now - self._last_event_time < DEBOUNCE_SECONDS:
+        # Ignore common temporary files that don't warrant a restart
+        if any(x in event.src_path for x in (".lock", ".tmp", "__pycache__")):
             return
-        self._last_event_time = now
-        self.triggered = True
+        self._last_activity = time.monotonic()
+
+    def check_settled(self):
+        """Returns True if activity has settled for the debounce period."""
+        if not self._last_activity:
+            return False
+        if time.monotonic() - self._last_activity > DEBOUNCE_SECONDS:
+            self.triggered = True
+            return True
+        return False
 
 
 def run_with_reload(watch_path: str, extra_args: list[str] | None = None) -> int:
@@ -65,7 +73,7 @@ def run_with_reload(watch_path: str, extra_args: list[str] | None = None) -> int
         observer.start()
 
         try:
-            while not handler.triggered:
+            while not handler.check_settled():
                 # Check if the child exited on its own (crash / clean shutdown).
                 ret = proc.poll()
                 if ret is not None:

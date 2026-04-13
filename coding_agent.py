@@ -277,9 +277,10 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
 def execute_tool(name, arguments_str):
     """Parse arguments and execute a tool, returning the result string."""
     try:
-        # Use raw_decode to gracefully handle cases where the model might
-        # include trailing text after the JSON object.
-        decoder = json.JSONDecoder()
+        # Use raw_decode with strict=False to gracefully handle cases where the model
+        # might include trailing text or use literal control characters (like newlines)
+        # in JSON strings.
+        decoder = json.JSONDecoder(strict=False)
         args, _ = decoder.raw_decode(arguments_str.strip())
     except json.JSONDecodeError as e:
         print(f"\n[Error] Failed to parse tool arguments for '{name}': {e}", file=sys.stderr)

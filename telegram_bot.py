@@ -424,16 +424,22 @@ class GitHubWebhookHandler(tornado.web.RequestHandler):
                 return
 
             try:
-                result = await asyncio.to_thread(
+                # Use shield to ensure git pull completes even if the request is
+                # cancelled during a restart.
+                result = await asyncio.shield(asyncio.to_thread(
                     subprocess.run,
                     ["git", "pull", "--ff-only"],
                     capture_output=True, text=True, timeout=30,
                     cwd=os.path.dirname(os.path.abspath(__file__)),
-                )
+                ))
                 pull_output = result.stdout.strip()
                 logger.info(f"git pull: {pull_output}")
                 if result.returncode != 0:
                     logger.error(f"git pull stderr: {result.stderr.strip()}")
+            except asyncio.CancelledError:
+                # Silent during shutdown - hot-reload is doing its job.
+                logger.info("GitHub webhook: git pull task shielded during shutdown")
+                return
             except Exception as e:
                 logger.error(f"git pull failed: {e}")
                 pull_output = f"error: {e}"
