@@ -21,6 +21,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, COMMIT_HASH
 from settings_db import get_settings_db, init_default_settings, CATEGORY_AGENT, CATEGORY_TELEGRAM
+from memory_manager import get_memory_manager, MemorySession
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +33,12 @@ PROGRESS_REPORT_INTERVAL = 3 # send a progress update every N tool rounds
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 GITHUB_WEBHOOK_PATH = os.getenv("GITHUB_WEBHOOK_PATH", "/github-webhook")
 
-# Per-chat conversation history: chat_id -> list of message dicts
-_chat_histories: dict[int, list] = {}
-# Per-chat locks to serialize message processing
+# Per-session conversation history: session_uuid -> list of message dicts
+_chat_histories: dict[str, list] = {}
+# Per-chat locks to serialize message processing (keyed by chat_id)
 _chat_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+# Memory manager instance
+_memory_manager = get_memory_manager()
 
 # Track active message processing tasks for graceful shutdown
 _active_tasks: set[asyncio.Task] = set()
@@ -84,6 +87,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Coding Agent ready. Send me a message and I'll help you with coding tasks.\n\n"
         "Commands:\n"
         "/clear - Reset the conversation\n"
+        "/memory - Manage memory sessions\n"
         "/webhook - Show GitHub webhook configuration\n"
         "/status - Show server status\n"
         "/settings - Show/manage settings"
@@ -91,11 +95,164 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /clear command."""
+    """Handle /clear command - creates a new memory session."""
     chat_id = update.effective_chat.id
-    _chat_histories.pop(chat_id, None)
-    _chat_locks.pop(chat_id, None)
-    await update.message.reply_text("Conversation cleared.")
+    
+    # Create a new session for this chat (memory-based clear)
+    session = _memory_manager.create_session(str(chat_id))
+    
+    # Clear old session's history from memory
+    old_sessions = _memory_manager.list_sessions(str(chat_id))
+    for s in old_sessions:
+        if s.uuid != session.uuid:
+            _chat_histories.pop(s.uuid, None)
+    
+    await update.message.reply_text(f"New session started: `{session.uuid[:8]}`", parse_mode="HTML")
+
+
+async def handle_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /memory command - manage memory sessions."""
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    
+    if not args:
+        # Show current session and list
+        active_session = _memory_manager.get_active_session(str(chat_id))
+        all_sessions = _memory_manager.list_sessions(str(chat_id))
+        
+        lines = ["*Memory Sessions*"]
+        
+        if active_session:
+            lines.append(f"\n*Active:* {active_session.display_name} (`{active_session.uuid[:8]}`)")
+            if active_session.message_count:
+                lines.append(f"  Messages: {active_session.message_count}")
+        
+        if all_sessions:
+            lines.append(f"\n*All sessions ({len(all_sessions)}):*")
+            for s in all_sessions[:10]:  # Limit to 10
+                marker = " ●" if active_session and s.uuid == active_session.uuid else " ○"
+                name = s.name or s.uuid[:8]
+                lines.append(f"{marker} {name} ({s.uuid[:8]})")
+        else:
+            lines.append("\nNo saved sessions. Start chatting to create one!")
+        
+        lines.extend([
+            "\n*Commands:*",
+            "/memory list - List all sessions",
+            "/memory switch <uuid_or_name> - Switch to session",
+            "/memory new [name] - Create new session",
+            "/memory rename <uuid> <name> - Rename session",
+            "/memory delete <uuid> - Delete session",
+            "/memory export <uuid> - Export session data",
+        ])
+        
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+    
+    subcommand = args[0].lower()
+    
+    if subcommand == "list":
+        all_sessions = _memory_manager.list_sessions(str(chat_id))
+        if not all_sessions:
+            await update.message.reply_text("No memory sessions found. Start chatting to create one!")
+            return
+        
+        active = _memory_manager.get_active_session(str(chat_id))
+        lines = [f"*Memory Sessions ({len(all_sessions)}):*"]
+        
+        for s in all_sessions:
+            marker = "●" if active and s.uuid == active.uuid else "○"
+            name = s.name or s.uuid[:8]
+            created = s.created_at[:10] if s.created_at else "?"
+            msg_count = s.message_count or 0
+            lines.append(f"{marker} `{s.uuid[:8]}` *{name}* ({msg_count} msgs) - {created}")
+        
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    
+    elif subcommand == "new":
+        name = " ".join(args[1:]) if len(args) > 1 else None
+        session = _memory_manager.create_session(str(chat_id), name=name)
+        name_str = f" named '{name}'" if name else ""
+        await update.message.reply_text(f"Created new session{name_str}: `{session.uuid[:8]}" + "`", parse_mode="Markdown")
+    
+    elif subcommand == "switch" and len(args) >= 2:
+        query = " ".join(args[1:])
+        # Try to find by exact UUID, partial UUID, or name
+        session = _memory_manager.get_session(query)
+        if not session:
+            session = _memory_manager.get_session_by_name(str(chat_id), query)
+        
+        if session:
+            success = _memory_manager.switch_session(str(chat_id), session.uuid)
+            if success:
+                await update.message.reply_text(f"Switched to session: {session.display_name} (`{session.uuid[:8]}`)", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("Failed to switch session.")
+        else:
+            await update.message.reply_text(f"Session not found: '{query}'. Use /memory list to see available sessions.")
+    
+    elif subcommand == "rename" and len(args) >= 3:
+        session_id = args[1]
+        new_name = " ".join(args[2:])
+        
+        # Find session
+        session = _memory_manager.get_session(session_id)
+        if not session:
+            session = _memory_manager.get_session_by_name(str(chat_id), session_id)
+        
+        if session:
+            success = _memory_manager.rename_session(session.uuid, new_name)
+            if success:
+                await update.message.reply_text(f"Renamed session to: '{new_name}'")
+            else:
+                await update.message.reply_text("Failed to rename session.")
+        else:
+            await update.message.reply_text(f"Session not found: '{session_id}'")
+    
+    elif subcommand == "delete" and len(args) >= 2:
+        session_id = " ".join(args[1:])
+        session = _memory_manager.get_session(session_id)
+        if not session:
+            session = _memory_manager.get_session_by_name(str(chat_id), session_id)
+        
+        if session:
+            success = _memory_manager.delete_session(session.uuid)
+            if success:
+                _chat_histories.pop(session.uuid, None)
+                await update.message.reply_text(f"Deleted session: {session.display_name}")
+            else:
+                await update.message.reply_text("Failed to delete session.")
+        else:
+            await update.message.reply_text(f"Session not found: '{session_id}'")
+    
+    elif subcommand == "export" and len(args) >= 2:
+        session_id = " ".join(args[1:])
+        session = _memory_manager.get_session(session_id)
+        if not session:
+            session = _memory_manager.get_session_by_name(str(chat_id), session_id)
+        
+        if session:
+            data = _memory_manager.export_session(session.uuid)
+            if data:
+                # Truncate if too long
+                if len(data) > 4000:
+                    data = data[:3900] + "\n... (truncated)"
+                await update.message.reply_text(f"```json\n{data}\n```", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("Failed to export session.")
+        else:
+            await update.message.reply_text(f"Session not found: '{session_id}'")
+    
+    else:
+        await update.message.reply_text(
+            "Unknown subcommand. Usage:\n"
+            "/memory list\n"
+            "/memory new [name]\n"
+            "/memory switch <uuid_or_name>\n"
+            "/memory rename <uuid> <name>\n"
+            "/memory delete <uuid>\n"
+            "/memory export <uuid>"
+        )
 
 
 async def handle_webhook(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -132,11 +289,13 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Get settings db stats
     db_stats = get_settings_db().get_stats()
+    memory_stats = _memory_manager.get_stats()
 
     lines = [
         f"Build: {COMMIT_HASH}",
         f"Uptime: {uptime_str}",
         f"Active chats: {len(_chat_histories)}",
+        f"Whitelisted sessions: {memory_stats['total_sessions']}",
         f"Webhook port: {WEBHOOK_PORT}",
         f"GitHub webhook: {GITHUB_WEBHOOK_PATH}",
         f"GitHub secret: {'configured' if GITHUB_WEBHOOK_SECRET else 'not set'}",
@@ -311,7 +470,13 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         api_key = context.bot_data["api_key"]
         invoke_url = context.bot_data["invoke_url"]
         model = context.bot_data["model"]
-        history = _chat_histories.setdefault(chat_id, [])
+        
+        # Get or create a session for this chat (auto-creates on first message)
+        session = _memory_manager.get_or_create_session(str(chat_id), auto_create=True)
+        session_key = session.uuid
+        
+        # Use the session's history
+        history = _chat_histories.setdefault(session_key, [])
 
         # Send typing indicator
         await update.effective_chat.send_action("typing")
@@ -327,7 +492,7 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
                 progress_callback=progress_cb,
             )
         except Exception as e:
-            logger.error(f"Error in agent_loop for chat {chat_id}: {e}", exc_info=True)
+            logger.error(f"Error in agent_loop for chat {chat_id}, session {session_key[:8]}: {e}", exc_info=True)
             reply = None
             status = STATUS_ERROR
 
@@ -347,8 +512,11 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": reply})
 
-        # Send reply, prefixed with build hash, splitting if necessary
-        reply = f"[build {COMMIT_HASH}]\n{reply}"
+        # Update session message count
+        _memory_manager.update_session_stats(session_key, len(history))
+
+        # Send reply, prefixed with build hash and session reference, splitting if necessary
+        reply = f"[build {COMMIT_HASH}] 👤 {session.display_name}\n{reply}"
         for chunk in split_message(reply):
             if chunk.strip():
                 await update.message.reply_text(chunk)
@@ -498,6 +666,7 @@ def run_telegram_bot(api_key: str, invoke_url: str, model: str) -> None:
 
     tg_app.add_handler(CommandHandler("start", handle_start))
     tg_app.add_handler(CommandHandler("clear", handle_clear))
+    tg_app.add_handler(CommandHandler("memory", handle_memory))
     tg_app.add_handler(CommandHandler("webhook", handle_webhook))
     tg_app.add_handler(CommandHandler("status", handle_status))
     tg_app.add_handler(CommandHandler("settings", handle_settings))

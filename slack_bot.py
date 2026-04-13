@@ -16,16 +16,19 @@ from slack_sdk.errors import SlackApiError
 
 from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, COMMIT_HASH
 from settings_db import get_settings_db, init_default_settings
+from memory_manager import get_memory_manager, MemorySession
 
 logger = logging.getLogger(__name__)
 
-MAX_MESSAGE_LENGTH = 40000  # Slack has higher limits than Telegram
-PROGRESS_REPORT_INTERVAL = 3  # send a progress update every N tool rounds
+MAX_MESSAGE_LENGTH = 40000 # Slack has higher limits than Telegram
+PROGRESS_REPORT_INTERVAL = 3 # send a progress update every N tool rounds
 
-# Per-channel conversation history: channel_id -> list of message dicts
+# Per-session conversation history: session_uuid -> list of message dicts
 _channel_histories: dict[str, list] = {}
-# Per-channel locks to serialize message processing
+# Per-channel locks to serialize message processing (keyed by channel_id)
 _channel_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+# Memory manager instance
+_memory_manager = get_memory_manager()
 
 # Server start time for status
 _start_time: float = 0.0
@@ -67,8 +70,8 @@ def sanitize_command_text(text: str) -> str:
     # Remove plain URL brackets
     text = re.sub(r'<(https?://[^>]+)>', r'\1', text)
     # Remove special Slack characters
-    text = text.replace('\xa0', ' ')  # Non-breaking space
-    text = re.sub(r'\s+', ' ', text)  # Collapse whitespace
+    text = text.replace('\xa0', ' ') # Non-breaking space
+    text = re.sub(r'\s+', ' ', text) # Collapse whitespace
     return text.strip()
 
 
@@ -166,7 +169,7 @@ class SlackBot:
 
             # Check if this is a direct message (IM) - check event payload first to avoid API call
             if event.get("channel_type") != "im" and not channel_id.startswith("D"):
-                return  # Only process DMs, mentions are handled separately
+                return # Only process DMs, mentions are handled separately
 
             await self._process_message(channel_id, user, text, say)
 
@@ -181,8 +184,14 @@ class SlackBot:
 
             # Parse command subcommands
             if text.lower() == "clear":
-                _channel_histories.pop(channel_id, None)
-                await say(text="*Conversation cleared.*", mrkdwn=True)
+                # Create a new session for this channel (memory-based clear)
+                session = _memory_manager.create_session(channel_id)
+                # Clear old session's history from memory
+                old_sessions = _memory_manager.list_sessions(channel_id)
+                for s in old_sessions:
+                    if s.uuid != session.uuid:
+                        _channel_histories.pop(s.uuid, None)
+                await say(text=f"*New session started:* `{session.uuid[:8]}`", mrkdwn=True)
                 return
 
             if text.lower() == "status":
@@ -193,12 +202,14 @@ class SlackBot:
 
                 # Get settings db stats
                 db_stats = get_settings_db().get_stats()
+                memory_stats = _memory_manager.get_stats()
 
                 status_text = (
                     f"*Coding Guy Status*\n"
                     f"• Build: `{COMMIT_HASH}`\n"
                     f"• Uptime: {uptime_str}\n"
                     f"• Active conversations: {len(_channel_histories)}\n"
+                    f"• Memory sessions: {memory_stats['total_sessions']}\n"
                     f"• Model: `{self.model}`\n"
                     f"• Settings: {db_stats.get('total_settings', 0)} settings, {db_stats.get('total_categories', 0)} categories"
                 )
@@ -239,7 +250,7 @@ class SlackBot:
                         await say(text=f"No settings found" + (f" in category '{category}'" if category else ""), mrkdwn=True)
                         return
                     lines = [f"*Settings*" + (f" (category: {category})" if category else "")]
-                    for key, val in list(settings.items())[:15]:  # Limit to 15
+                    for key, val in list(settings.items())[:15]: # Limit to 15
                         lines.append(f"• `{key}`: {val}")
                     if len(settings) > 15:
                         lines.append(f"• ... and {len(settings) - 15} more")
@@ -283,8 +294,8 @@ class SlackBot:
                         settings = data.get("settings", [])
                         while len(json.dumps(data, indent=2)) > 3400 and settings:
                             settings.pop()
-                            data["truncated"] = True
-                            data["total_settings"] = len(db.get_all_settings())
+                        data["truncated"] = True
+                        data["total_settings"] = len(db.get_all_settings())
                         json_data = json.dumps(data, indent=2)
                     await say(text=f"```json\n{json_data}\n```", mrkdwn=True)
                     return
@@ -292,12 +303,133 @@ class SlackBot:
                 await say(text="Unknown subcommand. Try: `list [category]`, `get <key>`, `set <key> <value>`, `categories`, `export`", mrkdwn=True)
                 return
 
+            if text.lower().startswith("memory"):
+                parts = text.split()
+                args = parts[1:]
+                
+                if not args:
+                    # Show current session and list
+                    active_session = _memory_manager.get_active_session(channel_id)
+                    all_sessions = _memory_manager.list_sessions(channel_id)
+                    
+                    lines = ["*Memory Sessions*"]
+                    
+                    if active_session:
+                        lines.append(f"\n*Active:* {active_session.display_name} (`{active_session.uuid[:8]}`)")
+                        if active_session.message_count:
+                            lines.append(f"  Messages: {active_session.message_count}")
+                    
+                    if all_sessions:
+                        lines.append(f"\n*All sessions ({len(all_sessions)}):*")
+                        for s in all_sessions[:10]:  # Limit to 10
+                            marker = " ●" if active_session and s.uuid == active_session.uuid else " ○"
+                            name = s.name or s.uuid[:8]
+                            lines.append(f"{marker} {name} (`{s.uuid[:8]}`)")
+                    else:
+                        lines.append("\nNo saved sessions. Start chatting to create one!")
+                    
+                    lines.extend([
+                        "\n*Commands:*",
+                        "• `/coding-guy memory list` - List all sessions",
+                        "• `/coding-guy memory new [name]` - Create new session",
+                        "• `/coding-guy memory switch <uuid_or_name>` - Switch to session",
+                        "• `/coding-guy memory rename <uuid> <name>` - Rename session",
+                        "• `/coding-guy memory delete <uuid>` - Delete session",
+                    ])
+                    
+                    await say(text="\n".join(lines), mrkdwn=True)
+                    return
+                
+                subcommand = args[0].lower() if args else ""
+                
+                if subcommand == "list":
+                    all_sessions = _memory_manager.list_sessions(channel_id)
+                    if not all_sessions:
+                        await say(text="No memory sessions found. Start chatting to create one!", mrkdwn=True)
+                        return
+                    
+                    active = _memory_manager.get_active_session(channel_id)
+                    lines = [f"*Memory Sessions ({len(all_sessions)}):*"]
+                    
+                    for s in all_sessions:
+                        marker = "●" if active and s.uuid == active.uuid else "○"
+                        name = s.name or s.uuid[:8]
+                        created = s.created_at[:10] if s.created_at else "?"
+                        msg_count = s.message_count or 0
+                        lines.append(f"{marker} `{s.uuid[:8]}` *{name}* ({msg_count} msgs) - {created}")
+                    
+                    await say(text="\n".join(lines), mrkdwn=True)
+                    return
+                
+                elif subcommand == "new":
+                    name = " ".join(args[1:]) if len(args) > 1 else None
+                    session = _memory_manager.create_session(channel_id, name=name)
+                    name_str = f" named '{name}'" if name else ""
+                    await say(text=f"Created new session{name_str}: `{session.uuid[:8]}`", mrkdwn=True)
+                    return
+                
+                elif subcommand == "switch" and len(args) >= 2:
+                    query = " ".join(args[1:])
+                    session = _memory_manager.get_session(query)
+                    if not session:
+                        session = _memory_manager.get_session_by_name(channel_id, query)
+                    
+                    if session:
+                        success = _memory_manager.switch_session(channel_id, session.uuid)
+                        if success:
+                            await say(text=f"Switched to session: {session.display_name} (`{session.uuid[:8]}`)", mrkdwn=True)
+                        else:
+                            await say(text="Failed to switch session.", mrkdwn=True)
+                    else:
+                        await say(text=f"Session not found: '{query}'", mrkdwn=True)
+                    return
+                
+                elif subcommand == "rename" and len(args) >= 3:
+                    session_id = args[1]
+                    new_name = " ".join(args[2:])
+                    
+                    session = _memory_manager.get_session(session_id)
+                    if not session:
+                        session = _memory_manager.get_session_by_name(channel_id, session_id)
+                    
+                    if session:
+                        success = _memory_manager.rename_session(session.uuid, new_name)
+                        if success:
+                            await say(text=f"Renamed session to: '{new_name}'", mrkdwn=True)
+                        else:
+                            await say(text="Failed to rename session.", mrkdwn=True)
+                    else:
+                        await say(text=f"Session not found: '{session_id}'", mrkdwn=True)
+                    return
+                
+                elif subcommand == "delete" and len(args) >= 2:
+                    session_id = " ".join(args[1:])
+                    session = _memory_manager.get_session(session_id)
+                    if not session:
+                        session = _memory_manager.get_session_by_name(channel_id, session_id)
+                    
+                    if session:
+                        success = _memory_manager.delete_session(session.uuid)
+                        if success:
+                            _channel_histories.pop(session.uuid, None)
+                            await say(text=f"Deleted session: {session.display_name}", mrkdwn=True)
+                        else:
+                            await say(text="Failed to delete session.", mrkdwn=True)
+                    else:
+                        await say(text=f"Session not found: '{session_id}'", mrkdwn=True)
+                    return
+                
+                else:
+                    await say(text="Unknown subcommand. Try: `memory list`, `memory new [name]`, `memory switch <uuid>`, `memory rename <uuid> <name>`, `memory delete <uuid>`", mrkdwn=True)
+                    return
+
             if text.lower() == "help" or not text:
                 help_text = (
                     "*Coding Guy - Your AI coding assistant*\n\n"
                     "*Commands:*\n"
                     "• `/coding-guy <question>` - Ask me anything about coding\n"
                     "• `/coding-guy clear` - Reset the conversation\n"
+                    "• `/coding-guy memory` - Manage memory sessions\n"
                     "• `/coding-guy status` - Show server status\n"
                     "• `/coding-guy settings` - Manage settings\n"
                     "• `/coding-guy help` - Show this help message\n\n"
@@ -319,69 +451,77 @@ class SlackBot:
 
         lock = _channel_locks[channel_id]
         async with lock:
-            history = _channel_histories.setdefault(channel_id, [])
+            # Get or create a session for this channel (auto-creates on first message)
+            session = _memory_manager.get_or_create_session(channel_id, auto_create=True)
+            session_key = session.uuid
+            
+            # Use the session's history
+            history = _channel_histories.setdefault(session_key, [])
 
-            # Send typing indicator (https://api.slack.com/methods/users.setPresence)
-            try:
-                await self.app.client.users_setPresence(presence="auto")
-            except Exception:
-                pass  # Typing indicator is best effort
+        # Send typing indicator (https://api.slack.com/methods/users.setPresence)
+        try:
+            await self.app.client.users_setPresence(presence="auto")
+        except Exception:
+            pass # Typing indicator is best effort
 
-            # Build progress callback for Slack updates
-            loop = asyncio.get_running_loop()
-            progress_cb = make_progress_callback(say, channel_id, loop)
+        # Build progress callback for Slack updates
+        loop = asyncio.get_running_loop()
+        progress_cb = make_progress_callback(say, channel_id, loop)
 
-            # Run the blocking agent_loop in a thread
-            try:
-                reply, status = await asyncio.to_thread(
-                    agent_loop,
-                    text,
-                    history,
-                    self.api_key,
-                    self.invoke_url,
-                    self.model,
-                    progress_callback=progress_cb,
-                )
-            except Exception as e:
-                logger.error(f"Error in agent_loop for channel {channel_id}: {e}", exc_info=True)
-                await say(
-                    text="Sorry, an error occurred while processing your request.",
-                    thread_ts=None
-                )
-                return
+        # Run the blocking agent_loop in a thread
+        try:
+            reply, status = await asyncio.to_thread(
+                agent_loop,
+                text,
+                history,
+                self.api_key,
+                self.invoke_url,
+                self.model,
+                progress_callback=progress_cb,
+            )
+        except Exception as e:
+            logger.error(f"Error in agent_loop for channel {channel_id}, session {session_key[:8]}: {e}", exc_info=True)
+            await say(
+                text="Sorry, an error occurred while processing your request.",
+                thread_ts=None
+            )
+            return
 
-            if reply is None:
-                await say(
-                    text="Sorry, an error occurred while processing your request.",
-                    thread_ts=None
-                )
-                return
+        if reply is None:
+            await say(
+                text="Sorry, an error occurred while processing your request.",
+                thread_ts=None
+            )
+            return
 
-            if not reply.strip():
-                await say(text="_(No response generated.)_", mrkdwn=True)
-                return
+        if not reply.strip():
+            await say(text="_(No response generated.)_", mrkdwn=True)
+            return
 
-            # Append status indicator for incomplete results
-            if status == STATUS_MAX_ROUNDS:
-                reply += "\n\n---\n_Reached maximum tool rounds. The task may be incomplete._"
+        # Append status indicator for incomplete results
+        if status == STATUS_MAX_ROUNDS:
+            reply += "\n\n---\n_Reached maximum tool rounds. The task may be incomplete._"
 
-            # Update conversation history
-            history.append({"role": "user", "content": text})
-            history.append({"role": "assistant", "content": reply})
+        # Update conversation history
+        history.append({"role": "user", "content": text})
+        history.append({"role": "assistant", "content": reply})
 
-            # Send reply, formatted for Slack
-            reply = f"[build `{COMMIT_HASH}`]\n{reply}"
+        # Update session message count
+        _memory_manager.update_session_stats(session_key, len(history))
 
-            # Format and send message chunks
-            formatted_reply = format_slack_message(reply)
-            for chunk in split_message(formatted_reply):
-                if chunk.strip():
-                    try:
-                        await say(text=chunk, mrkdwn=True)
-                    except SlackApiError as e:
-                        logger.error(f"Slack API error: {e}")
-                        # Try sending without markdown if rich formatting fails
-                        await say(text=re.sub(r'(`|\*|_)', '', chunk), mrkdwn=False)
+        # Send reply, formatted for Slack with session reference
+        reply = f"[build `{COMMIT_HASH}`] :bust_in_silhouette: {session.display_name}\n{reply}"
+
+        # Format and send message chunks
+        formatted_reply = format_slack_message(reply)
+        for chunk in split_message(formatted_reply):
+            if chunk.strip():
+                try:
+                    await say(text=chunk, mrkdwn=True)
+                except SlackApiError as e:
+                    logger.error(f"Slack API error: {e}")
+                    # Try sending without markdown if rich formatting fails
+                    await say(text=re.sub(r'(`|\*|_)', '', chunk), mrkdwn=False)
 
     async def start(self):
         """Start the Slack bot with socket mode."""
