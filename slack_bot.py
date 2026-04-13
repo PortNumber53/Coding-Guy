@@ -458,56 +458,56 @@ class SlackBot:
             # Use the session's history
             history = _channel_histories.setdefault(session_key, [])
 
-        # Send typing indicator (https://api.slack.com/methods/users.setPresence)
-        try:
-            await self.app.client.users_setPresence(presence="auto")
-        except Exception:
-            pass # Typing indicator is best effort
+            # Send typing indicator (https://api.slack.com/methods/users.setPresence)
+            try:
+                await self.app.client.users_setPresence(presence="auto")
+            except Exception:
+                pass # Typing indicator is best effort
 
-        # Build progress callback for Slack updates
-        loop = asyncio.get_running_loop()
-        progress_cb = make_progress_callback(say, channel_id, loop)
+            # Build progress callback for Slack updates
+            loop = asyncio.get_running_loop()
+            progress_cb = make_progress_callback(say, channel_id, loop)
 
-        # Run the blocking agent_loop in a thread
-        try:
-            reply, status = await asyncio.to_thread(
-                agent_loop,
-                text,
-                history,
-                self.api_key,
-                self.invoke_url,
-                self.model,
-                progress_callback=progress_cb,
-            )
-        except Exception as e:
-            logger.error(f"Error in agent_loop for channel {channel_id}, session {session_key[:8]}: {e}", exc_info=True)
-            await say(
-                text="Sorry, an error occurred while processing your request.",
-                thread_ts=None
-            )
-            return
+            # Run the blocking agent_loop in a thread
+            try:
+                reply, status = await asyncio.to_thread(
+                    agent_loop,
+                    text,
+                    history,
+                    self.api_key,
+                    self.invoke_url,
+                    self.model,
+                    progress_callback=progress_cb,
+                )
+            except Exception as e:
+                logger.error(f"Error in agent_loop for channel {channel_id}, session {session_key[:8]}: {e}", exc_info=True)
+                await say(
+                    text="Sorry, an error occurred while processing your request.",
+                    thread_ts=None
+                )
+                return
 
-        if reply is None:
-            await say(
-                text="Sorry, an error occurred while processing your request.",
-                thread_ts=None
-            )
-            return
+            if reply is None:
+                await say(
+                    text="Sorry, an error occurred while processing your request.",
+                    thread_ts=None
+                )
+                return
 
-        if not reply.strip():
-            await say(text="_(No response generated.)_", mrkdwn=True)
-            return
+            if not reply.strip():
+                await say(text="_(No response generated.)_", mrkdwn=True)
+                return
 
-        # Append status indicator for incomplete results
-        if status == STATUS_MAX_ROUNDS:
-            reply += "\n\n---\n_Reached maximum tool rounds. The task may be incomplete._"
+            # Append status indicator for incomplete results
+            if status == STATUS_MAX_ROUNDS:
+                reply += "\n\n---\n_Reached maximum tool rounds. The task may be incomplete._"
 
-        # Update conversation history
-        history.append({"role": "user", "content": text})
-        history.append({"role": "assistant", "content": reply})
+            # Update conversation history
+            history.append({"role": "user", "content": text})
+            history.append({"role": "assistant", "content": reply})
 
-        # Update session message count
-        _memory_manager.update_session_stats(session_key, len(history))
+            # Update session message count
+            _memory_manager.update_session_stats(session_key, len(history))
 
         # Send reply, formatted for Slack with session reference
         reply = f"[build `{COMMIT_HASH}`] :bust_in_silhouette: {session.display_name}\n{reply}"

@@ -23,7 +23,7 @@ CATEGORY_MEMORY_SESSION = "memory_session"
 # Prefixes for settings keys
 MEMORY_ACTIVE_PREFIX = "memory.active."  # memory.active.<chat_id> = session_uuid
 MEMORY_SESSION_PREFIX = "memory.session."  # memory.session.<uuid> = session_data
-MEMORY_NAME_PREFIX = "memory.name."        # memory.name.<chat_id> = friendly_name
+MEMORY_INDEX_PREFIX = "memory.index."        # memory.index.<chat_id> = [uuid1, uuid2, ...]
 
 
 @dataclass
@@ -66,8 +66,39 @@ class MemoryManager:
     def _get_session_data_key(self, session_uuid: str) -> str:
         return f"{MEMORY_SESSION_PREFIX}{session_uuid}"
 
-    def _get_name_key(self, chat_id: str) -> str:
-        return f"{MEMORY_NAME_PREFIX}{chat_id}"
+    def _get_index_key(self, chat_id: str) -> str:
+        return f"{MEMORY_INDEX_PREFIX}{chat_id}"
+    
+    def _add_to_chat_index(self, chat_id: str, session_uuid: str):
+        """Add a session UUID to the chat's index."""
+        index_key = self._get_index_key(chat_id)
+        index = self.db.get(index_key) or []
+        if session_uuid not in index:
+            index.append(session_uuid)
+            self.db.set(
+                index_key,
+                index,
+                value_type="json",
+                category=CATEGORY_MEMORY,
+                description=f"Session index for chat {chat_id}"
+            )
+    
+    def _remove_from_chat_index(self, chat_id: str, session_uuid: str):
+        """Remove a session UUID from the chat's index."""
+        index_key = self._get_index_key(chat_id)
+        index = self.db.get(index_key) or []
+        if session_uuid in index:
+            index.remove(session_uuid)
+            if index:
+                self.db.set(
+                    index_key,
+                    index,
+                    value_type="json",
+                    category=CATEGORY_MEMORY,
+                    description=f"Session index for chat {chat_id}"
+                )
+            else:
+                self.db.delete(index_key)
 
     def get_active_session(self, chat_id: str) -> Optional[MemorySession]:
         """Get the currently active session for a chat."""
@@ -120,15 +151,8 @@ class MemoryManager:
             description=f"Active memory session for chat {chat_id}"
         )
 
-        # Store friendly name if provided
-        if name:
-            self.db.set(
-                self._get_name_key(chat_id),
-                name,
-                value_type="string",
-                category=CATEGORY_MEMORY,
-                description=f"Friendly name for chat {chat_id}"
-            )
+        # Add to chat's session index
+        self._add_to_chat_index(chat_id, session_uuid)
 
         logger.info(f"Created memory session {session_uuid[:8]} for chat {chat_id}")
         return session
@@ -159,6 +183,7 @@ class MemoryManager:
 
         # Update session's chat_id if it was from another chat
         if session.chat_id != chat_id:
+            old_chat_id = session.chat_id
             session.chat_id = chat_id
             session.updated_at = self._now()
             self.db.set(
@@ -168,6 +193,9 @@ class MemoryManager:
                 category=CATEGORY_MEMORY_SESSION,
                 description=f"Memory session for chat {chat_id}"
             )
+            # Update the chat indexes
+            self._remove_from_chat_index(old_chat_id, session_uuid)
+            self._add_to_chat_index(chat_id, session_uuid)
 
         logger.info(f"Switched chat {chat_id} to session {session_uuid[:8]}")
         return True
@@ -186,16 +214,7 @@ class MemoryManager:
             session.to_dict(),
             value_type="json",
             category=CATEGORY_MEMORY_SESSION,
-            description=f"Memory session for chat {session_uuid}"
-        )
-
-        # Update name mapping for the chat
-        self.db.set(
-            self._get_name_key(session.chat_id),
-            new_name,
-            value_type="string",
-            category=CATEGORY_MEMORY,
-            description=f"Friendly name for chat {session.chat_id}"
+            description=f"Memory session for chat {session.chat_id}"
         )
 
         logger.info(f"Renamed session {session_uuid[:8]} to '{new_name}'")
@@ -207,42 +226,54 @@ class MemoryManager:
         if not session:
             return False
 
+        chat_id = session.chat_id
+
         # Delete session data
         self.db.delete(self._get_session_data_key(session_uuid))
 
-        # If this was the active session for a chat, clear it
-        sessions = self.list_sessions(session.chat_id)
-        for s in sessions:
-            if s.uuid == session_uuid:
-                active_key = self._get_active_session_key(session.chat_id)
-                current_active = self.db.get(active_key)
-                if current_active == session_uuid:
-                    self.db.delete(active_key)
-                break
+        # Remove from chat's session index
+        self._remove_from_chat_index(chat_id, session_uuid)
+
+        # If this was the active session for the chat, clear it
+        active_key = self._get_active_session_key(chat_id)
+        current_active = self.db.get(active_key)
+        if current_active == session_uuid:
+            self.db.delete(active_key)
 
         logger.info(f"Deleted session {session_uuid[:8]}")
         return True
 
     def list_sessions(self, chat_id: Optional[str] = None) -> List[MemorySession]:
-        """List all sessions, optionally filtered by chat_id."""
-        # Get all session settings
-        all_settings = self.db.get_all_settings(category=CATEGORY_MEMORY_SESSION)
-        sessions = []
-
-        for setting in all_settings:
-            try:
-                if isinstance(setting.value, str):
-                    data = json.loads(setting.value)
-                else:
-                    data = setting.value
-                session = MemorySession.from_dict(data)
-                if chat_id is None or session.chat_id == chat_id:
+        """List all sessions, optionally filtered by chat_id.
+        
+        Uses a per-chat index for efficient lookups when filtering by chat_id.
+        """
+        if chat_id is not None:
+            # Use the chat's session index for efficient lookup
+            index_key = self._get_index_key(chat_id)
+            session_uuids = self.db.get(index_key) or []
+            sessions = []
+            for uuid in session_uuids:
+                session = self.get_session(uuid)
+                if session:
                     sessions.append(session)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning(f"Failed to parse session data: {e}")
-                continue
-
-        return sorted(sessions, key=lambda s: s.updated_at or s.created_at, reverse=True)
+            return sorted(sessions, key=lambda s: s.updated_at or s.created_at, reverse=True)
+        else:
+            # Get all session settings when no chat_id filter
+            all_settings = self.db.get_all_settings(category=CATEGORY_MEMORY_SESSION)
+            sessions = []
+            for setting in all_settings:
+                try:
+                    if isinstance(setting.value, str):
+                        data = json.loads(setting.value)
+                    else:
+                        data = setting.value
+                    session = MemorySession.from_dict(data)
+                    sessions.append(session)
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"Failed to parse session data: {e}")
+                    continue
+            return sorted(sessions, key=lambda s: s.updated_at or s.created_at, reverse=True)
 
     def update_session_stats(self, session_uuid: str, message_count: int):
         """Update session statistics."""

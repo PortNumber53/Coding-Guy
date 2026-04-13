@@ -295,7 +295,7 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Build: {COMMIT_HASH}",
         f"Uptime: {uptime_str}",
         f"Active chats: {len(_chat_histories)}",
-        f"Whitelisted sessions: {memory_stats['total_sessions']}",
+        f"Memory sessions: {memory_stats['total_sessions']}",
         f"Webhook port: {WEBHOOK_PORT}",
         f"GitHub webhook: {GITHUB_WEBHOOK_PATH}",
         f"GitHub secret: {'configured' if GITHUB_WEBHOOK_SECRET else 'not set'}",
