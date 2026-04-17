@@ -7,6 +7,11 @@ import os
 import shlex
 
 import requests
+from bs4 import BeautifulSoup
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
 
 # ---------------------------------------------------------------------------
 # Docker manager reference (set from coding_agent.py at startup)
@@ -268,6 +273,151 @@ def ask_ollama(prompt: str, model: str = "gemma4:e4b") -> str:
         return json.dumps({"response": data.get("response", ""), "model": model})
     except Exception as e:
         return json.dumps({"error": f"Failed to call Ollama: {str(e)}"})
+
+
+# --- Browser tools using Playwright ---
+
+_playwright_ctx = None
+_browser = None
+_page = None
+
+
+def _get_browser_page():
+    global _playwright_ctx, _browser, _page
+    if sync_playwright is None:
+        raise RuntimeError("playwright is not installed. Add it to requirements.txt and install.")
+    if _playwright_ctx is None:
+        _playwright_ctx = sync_playwright().start()
+        _browser = _playwright_ctx.chromium.launch(headless=True)
+        _page = _browser.new_page()
+    return _page
+
+
+def browser_navigate(url: str, wait_until: str = "load", timeout: int = 60000) -> str:
+    """Navigate the browser to a URL.
+    wait_until: "load", "domcontentloaded", "networkidle", "commit".
+    """
+    try:
+        page = _get_browser_page()
+        page.goto(url, wait_until=wait_until, timeout=timeout)
+        return json.dumps({
+            "url": page.url,
+            "title": page.title(),
+            "status": "navigated"
+        })
+    except Exception as e:
+        # If it's just a timeout, we might still have some content
+        return json.dumps({
+            "url": page.url if 'page' in locals() else url,
+            "title": page.title() if 'page' in locals() else "Unknown",
+            "status": "timeout",
+            "error": str(e)
+        })
+
+
+def browser_action(action: str, selector: str | None = None, text: str | None = None,
+                   key: str | None = None) -> str:
+    """Perform an action on the current page.
+    Supported actions: click, type, press, wait_for_selector, wait_for_timeout.
+    """
+    try:
+        page = _get_browser_page()
+        if action == "click":
+            page.click(selector, timeout=60000)
+        elif action == "type":
+            page.fill(selector, text, timeout=60000)
+        elif action == "press":
+            page.press(selector or "body", key, timeout=60000)
+        elif action == "wait_for_selector":
+            page.wait_for_selector(selector, timeout=60000)
+        elif action == "wait_for_timeout":
+            page.wait_for_timeout(int(text or 1000))
+        else:
+            return json.dumps({"error": f"Unsupported action: {action}"})
+        
+        return json.dumps({"status": "success", "action": action, "selector": selector})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def browser_get_content(include_images: bool = False) -> str:
+    """Get the simplified content of the current page.
+    If include_images is True, it will include image src and alt tags.
+    """
+    try:
+        page = _get_browser_page()
+        content = page.content()
+        soup = BeautifulSoup(content, "html.parser")
+        
+        # Remove script and style elements
+        for script_or_style in soup(["script", "style", "meta", "link", "noscript"]):
+            script_or_style.decompose()
+            
+        if include_images:
+            # Replace images with a text representation
+            for img in soup.find_all("img"):
+                src = img.get("src", "")
+                alt = img.get("alt", "")
+                if src:
+                    img.replace_with(f"\n[IMAGE: {src} | ALT: {alt}]\n")
+
+        # Get text and clean it up
+        text = soup.get_text(separator="\n")
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        clean_text = "\n".join(chunk for chunk in chunks if chunk)
+        
+        # Limit output
+        max_len = 30000
+        truncated = len(clean_text) > max_len
+        
+        return json.dumps({
+            "url": page.url,
+            "title": page.title(),
+            "content": clean_text[:max_len],
+            "truncated": truncated
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def browser_get_elements(selector: str, attributes: list[str] | None = None) -> str:
+    """Get details of elements matching a selector.
+    attributes: optional list of attribute names to extract (e.g. ["src", "href", "aria-label"]).
+    """
+    try:
+        page = _get_browser_page()
+        elements = page.query_selector_all(selector)
+        results = []
+        for el in elements:
+            data = {
+                "text": el.inner_text(),
+            }
+            if attributes:
+                for attr in attributes:
+                    data[attr] = el.get_attribute(attr)
+            results.append(data)
+        
+        return json.dumps({
+            "selector": selector,
+            "count": len(results),
+            "elements": results[:100]  # Limit to 100 results
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def browser_close() -> str:
+    """Close the browser and cleanup."""
+    global _playwright_ctx, _browser, _page
+    try:
+        if _page: _page.close()
+        if _browser: _browser.close()
+        if _playwright_ctx: _playwright_ctx.stop()
+        _page = _browser = _playwright_ctx = None
+        return json.dumps({"status": "closed"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 # --- Tool definitions for the OpenAI-compatible tool-calling API ---
@@ -580,6 +730,113 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_navigate",
+            "description": "Navigate to a URL using a headless browser.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to navigate to."
+                    },
+                    "wait_until": {
+                        "type": "string",
+                        "enum": ["load", "domcontentloaded", "networkidle", "commit"],
+                        "description": "When to consider navigation finished (default: load)."
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Maximum time in milliseconds (default: 60000)."
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_action",
+            "description": "Perform an action like click, type, or press on the current page.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["click", "type", "press", "wait_for_selector", "wait_for_timeout"],
+                        "description": "The action to perform."
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "The CSS or Playwright selector for the element."
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The text to type (for 'type' or 'wait_for_timeout')."
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "The key to press (for 'press')."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_get_content",
+            "description": "Get the text content of the current page, cleaned of HTML tags and scripts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_images": {
+                        "type": "boolean",
+                        "description": "Whether to include image URLs and alt text in the output (default: false)."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_get_elements",
+            "description": "Extract text and attributes from elements matching a CSS selector.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "The CSS or Playwright selector to find elements."
+                    },
+                    "attributes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of attribute names to extract from each matching element."
+                    }
+                },
+                "required": ["selector"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_close",
+            "description": "Close the browser and release resources.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
 ]
 
 def _make_handler(func):
@@ -608,4 +865,9 @@ TOOL_HANDLERS = {
     "write_dockerfile": _make_handler(write_dockerfile),
     "web": _make_handler(web),
     "ask_ollama": _make_handler(ask_ollama),
+    "browser_navigate": _make_handler(browser_navigate),
+    "browser_action": _make_handler(browser_action),
+    "browser_get_content": _make_handler(browser_get_content),
+    "browser_get_elements": _make_handler(browser_get_elements),
+    "browser_close": _make_handler(browser_close),
 }

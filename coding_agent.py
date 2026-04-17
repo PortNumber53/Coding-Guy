@@ -70,7 +70,8 @@ project root.
 
 Available tools: read_file, write_file, patch_file, grep_file, ls_file, \
 execute_command, multi_read_file, multi_write_file, read_dockerfile, \
-write_dockerfile, rebuild_container, web, ask_ollama.
+write_dockerfile, rebuild_container, web, ask_ollama, \
+browser_navigate, browser_action, browser_get_content, browser_close.
 
 When given a task:
 1. Use ls_file and grep_file to explore the codebase.
@@ -79,6 +80,14 @@ When given a task:
 4. Use patch_file for targeted edits or write_file for new files.
 5. Use execute_command to run builds, tests, or scripts (e.g. "go run main.go", "python3 app.py", "npm test").
 6. Verify your work by reading the result.
+
+For web browsing and data collection:
+1. Use browser_navigate to go to a website.
+2. Use browser_action (click, type, press, wait) to interact with the page.
+3. Use browser_get_content to retrieve page text. Set include_images=True if you need image URLs and alt text.
+4. Use browser_get_elements to extract granular data like phone numbers, aria-labels, or specific attributes (e.g. src for images, href for links) from matching selectors.
+5. If you need to extract specific JSON data (amenities, business hours, reviews), use your own reasoning over the tool outputs to format it as requested.
+6. Always call browser_close when finished to release resources.
 
 If a command or build fails because of a missing OS package, library, or runtime:
 1. Call read_dockerfile to get the current Dockerfile content.
