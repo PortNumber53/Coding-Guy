@@ -13,7 +13,7 @@ import os
 import time
 from typing import Optional
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 import requests
@@ -148,7 +148,7 @@ class SunoClient:
         url = f"{self.base_url}{endpoint}"
         
         try:
-            response = self.session.request(method, url, timeout=300, **kwargs)
+            response = self.session.request(method, url, timeout=60, **kwargs)
             
             if response.status_code == 401:
                 raise SunoAuthError("Invalid API key. Check your SUNO_API_KEY configuration.")
@@ -210,8 +210,8 @@ class SunoClient:
         job = GenerationJob(
             job_id=data.get("job_id"),
             status=SongStatus(data.get("status", "pending")),
-            created_at=datetime.fromisoformat(data.get("created_at", datetime.now().isoformat())),
-            updated_at=datetime.fromisoformat(data.get("updated_at", datetime.now().isoformat())),
+            created_at=datetime.fromisoformat(data.get("created_at", datetime.now(timezone.utc).isoformat())),
+            updated_at=datetime.fromisoformat(data.get("updated_at", datetime.now(timezone.utc).isoformat())),
         )
         
         return job
@@ -349,7 +349,7 @@ class SunoClient:
         Raises:
             SunoAPIError: If the job fails
         """
-        start_time = time.time()
+        start_time = time.monotonic()
         
         while True:
             job = self.get_job_status(job_id)
@@ -363,7 +363,7 @@ class SunoClient:
             if job.status == SongStatus.CANCELLED:
                 raise SunoAPIError("Job was cancelled")
             
-            if timeout and (time.time() - start_time) > timeout:
+            if timeout and (time.monotonic() - start_time) > timeout:
                 return None
             
             time.sleep(poll_interval)
@@ -371,17 +371,23 @@ class SunoClient:
     def generate_songs_batch(
         self,
         variations: list[dict],
-        poll_interval: int = 5
+        poll_interval: int = 5,
+        timeout: int = 600
     ) -> list[SongData]:
         """Generate multiple songs in parallel and wait for completion.
         
         Args:
             variations: List of dicts with keys: lyrics, style, title, etc.
             poll_interval: Seconds between status checks
+            timeout: Maximum time to wait for all jobs in seconds (default: 600)
             
         Returns:
             List of SongData for completed songs
+            
+        Raises:
+            TimeoutError: If jobs don't complete within the timeout period
         """
+        start_time = time.monotonic()
         # Submit all jobs
         jobs = []
         for params in variations:
@@ -393,6 +399,24 @@ class SunoClient:
         pending = set(range(len(jobs)))
         
         while pending:
+            # Check timeout
+            elapsed = time.monotonic() - start_time
+            if elapsed > timeout:
+                # Build error message with status of pending jobs
+                job_statuses = []
+                for i in pending:
+                    job = jobs[i]
+                    try:
+                        status = self.get_job_status(job.job_id)
+                        job_statuses.append(f"Job {job.job_id}: {status.value}")
+                    except Exception:
+                        job_statuses.append(f"Job {job.job_id}: unknown")
+                
+                raise TimeoutError(
+                    f"Batch song generation timed out after {timeout}s. "
+                    f"Pending: {', '.join(job_statuses)}"
+                )
+            
             time.sleep(poll_interval)
             
             newly_done = set()
@@ -407,13 +431,13 @@ class SunoClient:
                         song_id="",
                         status=SongStatus.FAILED,
                         metadata=SongMetadata(
-                            title=params.get("title", "Failed"),
+                            title=variations[idx].get("title", "Failed"),
                             artist="Unknown",
                             duration_seconds=0,
                             lyrics_snippet="",
-                            style=params.get("style", ""),
+                            style=variations[idx].get("style", ""),
                             model_version="v3",
-                            created_at=datetime.now()
+                            created_at=datetime.now(timezone.utc)
                         )
                     )
                     newly_done.add(idx)
