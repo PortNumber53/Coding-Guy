@@ -73,6 +73,13 @@ execute_command, multi_read_file, multi_write_file, read_dockerfile, \
 write_dockerfile, rebuild_container, web, ask_ollama, \
 browser_navigate, browser_action, browser_get_content, browser_close.
 
+Suno Music Tools (when SUNO_API_KEY is configured):
+- suno_generate_song: Generate AI music with custom lyrics and style
+- suno_get_job_status: Check generation progress
+- suno_get_song_data: Get song metadata and download URLs
+- suno_list_songs: Browse generated songs
+- suno_delete_song: Remove a generated song
+
 When given a task:
 1. Use ls_file and grep_file to explore the codebase.
 2. Read relevant files to understand the current state.

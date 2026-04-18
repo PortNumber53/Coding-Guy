@@ -13,6 +13,15 @@ try:
 except ImportError:
     sync_playwright = None
 
+# Import Suno client tools
+from suno_client import (
+    suno_generate_song,
+    suno_get_job_status,
+    suno_get_song_data,
+    suno_list_songs,
+    suno_delete_song,
+)
+
 # ---------------------------------------------------------------------------
 # Docker manager reference (set from coding_agent.py at startup)
 # ---------------------------------------------------------------------------
@@ -33,7 +42,7 @@ def _get_docker_manager():
 
 
 # ---------------------------------------------------------------------------
-# Tool implementations — file tools execute inside the Docker container
+# Tool implementations - file tools execute inside the Docker container
 # ---------------------------------------------------------------------------
 
 
@@ -316,7 +325,7 @@ def browser_navigate(url: str, wait_until: str = "load", timeout: int = 60000) -
 
 
 def browser_action(action: str, selector: str | None = None, text: str | None = None,
-                   key: str | None = None) -> str:
+                  key: str | None = None) -> str:
     """Perform an action on the current page.
     Supported actions: click, type, press, wait_for_selector, wait_for_timeout.
     """
@@ -352,7 +361,7 @@ def browser_get_content(include_images: bool = False) -> str:
         # Remove script and style elements
         for script_or_style in soup(["script", "style", "meta", "link", "noscript"]):
             script_or_style.decompose()
-            
+        
         if include_images:
             # Replace images with a text representation
             for img in soup.find_all("img"):
@@ -364,7 +373,7 @@ def browser_get_content(include_images: bool = False) -> str:
         # Get text and clean it up
         text = soup.get_text(separator="\n")
         lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        chunks = (phrase.strip() for line in lines for phrase in line.split(" "))
         clean_text = "\n".join(chunk for chunk in chunks if chunk)
         
         # Limit output
@@ -382,7 +391,7 @@ def browser_get_content(include_images: bool = False) -> str:
 
 
 def browser_get_elements(selector: str, attributes: list[str] | None = None) -> str:
-    """Get details of elements matching a selector.
+    """Get details of elements matching a CSS selector.
     attributes: optional list of attribute names to extract (e.g. ["src", "href", "aria-label"]).
     """
     try:
@@ -411,9 +420,12 @@ def browser_close() -> str:
     """Close the browser and cleanup."""
     global _playwright_ctx, _browser, _page
     try:
-        if _page: _page.close()
-        if _browser: _browser.close()
-        if _playwright_ctx: _playwright_ctx.stop()
+        if _page:
+            _page.close()
+        if _browser:
+            _browser.close()
+        if _playwright_ctx:
+            _playwright_ctx.stop()
         _page = _browser = _playwright_ctx = None
         return json.dumps({"status": "closed"})
     except Exception as e:
@@ -837,7 +849,135 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "suno_generate_song",
+            "description": (
+                "Generate an AI song using Suno. Creates a musical composition with vocals based on provided lyrics and style. "
+                "Returns a job ID that can be used to check generation status. "
+                "Use wait_for_completion=True to poll until the song is ready."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "lyrics": {
+                        "type": "string",
+                        "description": "The lyrics for the song. Can be multiple lines with verses and chorus."
+                    },
+                    "style": {
+                        "type": "string",
+                        "description": "Musical style/genre description (e.g., 'Upbeat electronic pop with female vocals', 'Acoustic folk ballad', 'Rap with heavy beat')."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional title for the song."
+                    },
+                    "wait_for_completion": {
+                        "type": "boolean",
+                        "description": "If true, wait for generation to complete and return full song data. Default: false (returns job_id only)."
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Maximum seconds to wait for completion if wait_for_completion=True. Default: 300."
+                    }
+                },
+                "required": ["lyrics", "style"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suno_get_job_status",
+            "description": (
+                "Check the status of a song generation job submitted to Suno. "
+                "Returns current status (pending, processing, completed, failed) and progress information."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "The job ID returned from suno_generate_song."
+                    }
+                },
+                "required": ["job_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suno_get_song_data",
+            "description": (
+                "Retrieve complete metadata and URLs for a generated song from Suno. "
+                "Includes title, artist, duration, audio download URLs, and cover image. "
+                "Use this after a job status shows 'completed'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "song_id": {
+                        "type": "string",
+                        "description": "The song ID from a completed job, obtained via suno_get_job_status."
+                    }
+                },
+                "required": ["song_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suno_list_songs",
+            "description": (
+                "List all songs generated by the user in Suno. "
+                "Supports pagination and status filtering."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: 20, max: 100)."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Pagination offset for fetching more results. Default: 0."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "processing", "completed", "failed"],
+                        "description": "Optional filter by song status."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suno_delete_song",
+            "description": (
+                "Delete a generated song from Suno. "
+                "This permanently removes the song and all associated data."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "song_id": {
+                        "type": "string",
+                        "description": "The song ID to delete."
+                    }
+                },
+                "required": ["song_id"]
+            }
+        }
+    },
 ]
+
 
 def _make_handler(func):
     """Create a handler that filters out unexpected keyword arguments."""
@@ -870,4 +1010,9 @@ TOOL_HANDLERS = {
     "browser_get_content": _make_handler(browser_get_content),
     "browser_get_elements": _make_handler(browser_get_elements),
     "browser_close": _make_handler(browser_close),
+    "suno_generate_song": _make_handler(suno_generate_song),
+    "suno_get_job_status": _make_handler(suno_get_job_status),
+    "suno_get_song_data": _make_handler(suno_get_song_data),
+    "suno_list_songs": _make_handler(suno_list_songs),
+    "suno_delete_song": _make_handler(suno_delete_song),
 }
