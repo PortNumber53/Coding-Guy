@@ -275,6 +275,39 @@ The agent has access to these tools:
 - `read_dockerfile` / `write_dockerfile` / `rebuild_container` - Docker management
 - `web` - HTTP requests
 - `ask_ollama` - Local LLM queries
+- `suno_generate_song` - Generate AI music with custom lyrics
+- `suno_get_job_status` - Check song generation progress
+- `suno_get_song_data` - Retrieve song metadata and URLs
+- `suno_list_songs` - Browse generated songs
+- `suno_delete_song` - Delete a generated song
+
+## Suno API Integration
+
+The agent can generate AI music using the Suno API! Configure your `SUNO_API_KEY` in `.env` to enable music generation features.
+
+### Configuration
+
+Add to your `.env` file:
+```env
+SUNO_API_KEY=your-suno-api-key-here
+```
+
+### Music Generation Tools
+
+| Tool | Description | Example |
+|------|-------------|---------|
+| `suno_generate_song` | Generate a song with lyrics and style | `suno_generate_song(lyrics="Hello world...", style="Pop", title="Coding Anthem")` |
+| `suno_get_job_status` | Check generation progress | `suno_get_job_status(job_id="job-abc-123")` |
+| `suno_get_song_data` | Get completed song details | `suno_get_song_data(song_id="song-xyz-789")` |
+| `suno_list_songs` | Browse your generated songs | `suno_list_songs(limit=10)` |
+| `suno_delete_song` | Remove a song | `suno_delete_song(song_id="song-xyz-789")` |
+
+### Workflow
+1. Call `suno_generate_song` with your lyrics and desired style
+2. Receive a `job_id` - save this!
+3. Poll `suno_get_job_status` with the job ID until status is "completed"
+4. Call `suno_get_song_data` with the returned `song_id` to get download URLs
+5. Download your song from the provided URLs (mp3, wav formats available)
 
 ## Commands
 
