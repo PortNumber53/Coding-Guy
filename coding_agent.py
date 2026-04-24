@@ -11,6 +11,11 @@ import time
 import requests
 from dotenv import load_dotenv
 
+from openrouter_client import (
+    get_openrouter_api_key,
+    get_openrouter_model,
+)
+
 from docker_manager import DockerManager
 from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, set_docker_manager
 from rate_limiter import (
@@ -30,6 +35,9 @@ load_dotenv()
 
 INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 MODEL = "moonshotai/kimi-k2.5"
+
+# OpenRouter configuration
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MAX_TOOL_ROUNDS = 250
 
 # Rate limiting configuration
@@ -176,14 +184,14 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
     pool = get_global_pool()
     pool_key = pool.select_key() if pool else None
     actual_key = pool_key.key if pool_key else api_key
-    
+
     # Apply rate limiting before making the request
     limiter = get_global_limiter()
     if limiter:
         waited = limiter.wait_if_needed()
         if waited > 0:
             print(f"[Rate limit] Waiting {waited:.2f}s before next request", file=sys.stderr)
-    
+
     headers = {
         "Authorization": f"Bearer {actual_key}",
         "Accept": "text/event-stream" if stream else "application/json",
@@ -202,21 +210,21 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
     try:
         response = requests.post(invoke_url, headers=headers, json=payload, stream=stream, timeout=300)
         response.raise_for_status()
-        
+
         # Record successful request
         tokens_used = 0  # We don't get token count from streaming
         if pool_key:
             pool_key.record_usage(tokens_used=tokens_used, success=True)
-        
+
         # Record successful request for adaptive rate limiting
         if limiter:
             limiter.record_success()
-    
-    except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+
+    except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
         # Record failure for pool key
         is_http_error = isinstance(e, requests.exceptions.HTTPError)
         status_code = e.response.status_code if is_http_error and e.response is not None else 0
-        
+
         if pool_key:
             if status_code == 429:
                 pool_key.record_rate_limit_hit(status_code=status_code)
@@ -225,7 +233,7 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
                 print(f"[Pool] Key {pool_key.name} hit rate limit, recorded cooldown", file=sys.stderr)
             else:
                 pool_key.record_usage(tokens_used=0, success=False)
-        
+
         raise
 
     if not stream:
@@ -287,6 +295,11 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
         message["tool_calls"] = [
             tool_calls_by_index[i] for i in sorted(tool_calls_by_index)
         ]
+
+    # Warn if message appears incomplete (stream interrupted)
+    if content and not (content.endswith('.') or content.endswith('!') or content.endswith('?') or content.endswith('```')):
+        print("[Warning] Response may be incomplete due to connection interruption", file=sys.stderr)
+
     return message
 
 
@@ -307,7 +320,7 @@ def execute_tool(name, arguments_str):
     if not handler:
         return json.dumps({"error": f"Unknown tool: {name}"})
 
-    print(f"  -> {name}({', '.join(f'{k}={repr(v)[:60]}' for k, v in args.items())})", file=sys.stderr)
+    print(f" -> {name}({', '.join(f'{k}={repr(v)[:60]}' for k, v in args.items())})", file=sys.stderr)
     return handler(args)
 
 
@@ -331,25 +344,25 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
             try:
                 assistant_msg = call_llm_api(messages, api_key, invoke_url, model, stream=True)
                 break
-            except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
                 is_http_error = isinstance(e, requests.exceptions.HTTPError)
                 status_code = e.response.status_code if is_http_error and e.response is not None else 0
 
                 is_retryable = (
                     (is_http_error and (status_code == 429 or status_code >= 500)) or
-                    isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+                    isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError))
                 )
 
                 if is_retryable and attempt < max_retries:
                     wait = 10 * (attempt + 1)
                     error_type = status_code if is_http_error else "Connection"
                     print(f"\nAPI error ({error_type}), retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
-                    
+
                     # Record rate limit hit for adaptive rate limiting
                     if status_code == 429 and limiter:
                         limiter.record_rate_limit_hit()
                         print(f"[Rate limit] Recorded 429 error. Adaptive delay may increase.", file=sys.stderr)
-                    
+
                     time.sleep(wait)
                 elif not is_retryable:
                     print(f"\nAPI error: {e}", file=sys.stderr)
@@ -375,7 +388,7 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
 
             # Show a preview of the result
             result_preview = result[:200] + ("..." if len(result) > 200 else "")
-            print(f"  <- {result_preview}", file=sys.stderr)
+            print(f" <- {result_preview}", file=sys.stderr)
 
             messages.append({
                 "role": "tool",
@@ -413,6 +426,7 @@ def main():
         help="Workspace directory for the agent sandbox (default: %(default)s)",
     )
     parser.add_argument("--ollama", action="store_true", help="Use local Ollama instead of Nvidia API")
+    parser.add_argument("--openrouter", action="store_true", help="Use OpenRouter API instead of Nvidia API")
     parser.add_argument("--model", type=str, help="Override the model to use (default: gemma4:e4b for Ollama)")
     parser.add_argument("--api-base", type=str, help="Override the API base URL")
     # Rate limiting arguments
@@ -449,9 +463,17 @@ def main():
 
         watch_path = args.watch_path or os.path.join(os.getcwd(), ".git")
         extra_args = ["--workspace", args.workspace]
-        if args.ollama: extra_args.append("--ollama")
-        if args.model: extra_args.extend(["--model", args.model])
-        if args.api_base: extra_args.extend(["--api-base", args.api_base])
+        if args.openrouter:
+            extra_args.append("--openrouter")
+            if not get_openrouter_api_key():
+                print("Error: OPENROUTER_API_KEY not found. Please set it in .env.", file=sys.stderr)
+                sys.exit(1)
+        elif args.ollama:
+            extra_args.append("--ollama")
+        if args.model:
+            extra_args.extend(["--model", args.model])
+        if args.api_base:
+            extra_args.extend(["--api-base", args.api_base])
         sys.exit(run_with_reload(watch_path, extra_args))
 
     # Initialize rate limiter based on configuration
@@ -459,20 +481,20 @@ def main():
     strategy = args.rate_limit_strategy
     if strategy is None:
         strategy = DEFAULT_RATE_LIMIT_STRATEGY
-    
+
     if strategy != 'none':
         initial_delay = args.rate_limit_initial_delay
         if initial_delay is None:
             initial_delay = DEFAULT_RATE_LIMIT_INITIAL_DELAY
-        
+
         min_delay = args.rate_limit_min_delay
         if min_delay is None:
             min_delay = DEFAULT_RATE_LIMIT_MIN_DELAY
-        
+
         max_delay = args.rate_limit_max_delay
         if max_delay is None:
             max_delay = DEFAULT_RATE_LIMIT_MAX_DELAY
-        
+
         limiter = init_global_limiter(
             strategy=strategy,
             initial_delay=initial_delay,
@@ -481,10 +503,10 @@ def main():
         )
         print(f"Rate limiting enabled: {strategy} strategy", file=sys.stderr)
         if isinstance(limiter._limiter, AdaptiveRateLimiter):
-            print(f"  Initial delay: {initial_delay}s, Min: {min_delay}s, Max: {max_delay}s", file=sys.stderr)
+            print(f" Initial delay: {initial_delay}s, Min: {min_delay}s, Max: {max_delay}s", file=sys.stderr)
     else:
         print("Rate limiting disabled", file=sys.stderr)
-    
+
     # Initialize API key pool if multiple keys configured
     api_keys = parse_api_keys_from_env()
     if len(api_keys) > 1:
@@ -496,8 +518,15 @@ def main():
             print(f"API key pool initialized with {len(api_keys)} keys", file=sys.stderr)
         except ValueError as e:
             print(f"Warning: Failed to initialize key pool: {e}", file=sys.stderr)
-    
-    if args.ollama:
+
+    if args.openrouter:
+        invoke_url = args.api_base or OPENROUTER_URL
+        model_name = args.model or get_openrouter_model()
+        api_key = get_openrouter_api_key()
+        if not api_key:
+            print("Error: OPENROUTER_API_KEY not found. Please set it in .env.", file=sys.stderr)
+            sys.exit(1)
+    elif args.ollama:
         invoke_url = args.api_base or "http://127.0.0.1:11434/v1/chat/completions"
         model_name = args.model or "gemma4:e4b"
         api_key = "ollama"
@@ -531,7 +560,10 @@ def main():
             docker.cleanup()
         return
 
-    if args.ollama:
+    # Print status message for the chosen API
+    if args.openrouter:
+        print(f"OpenRouter Coding Agent (Model: {model_name})", file=sys.stderr)
+    elif args.ollama:
         print(f"Ollama Coding Agent (Model: {model_name})", file=sys.stderr)
     else:
         print(f"Nvidia Coding Agent (Model: {model_name})", file=sys.stderr)
@@ -565,7 +597,7 @@ def main():
             if reply is not None:
                 conversation_history.append({"role": "user", "content": user_input})
                 conversation_history.append({"role": "assistant", "content": reply})
-            print()
+                print()
     finally:
         docker.cleanup()
 
