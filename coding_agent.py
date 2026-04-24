@@ -12,10 +12,8 @@ import requests
 from dotenv import load_dotenv
 
 from openrouter_client import (
-    OpenRouterClient,
-    OpenRouterConfig,
     get_openrouter_api_key,
-    OPENROUTER_MODELS,
+    get_openrouter_model,
 )
 
 from docker_manager import DockerManager
@@ -186,14 +184,14 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
     pool = get_global_pool()
     pool_key = pool.select_key() if pool else None
     actual_key = pool_key.key if pool_key else api_key
-    
+
     # Apply rate limiting before making the request
     limiter = get_global_limiter()
     if limiter:
         waited = limiter.wait_if_needed()
         if waited > 0:
             print(f"[Rate limit] Waiting {waited:.2f}s before next request", file=sys.stderr)
-    
+
     headers = {
         "Authorization": f"Bearer {actual_key}",
         "Accept": "text/event-stream" if stream else "application/json",
@@ -212,21 +210,21 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
     try:
         response = requests.post(invoke_url, headers=headers, json=payload, stream=stream, timeout=300)
         response.raise_for_status()
-        
+
         # Record successful request
         tokens_used = 0  # We don't get token count from streaming
         if pool_key:
             pool_key.record_usage(tokens_used=tokens_used, success=True)
-        
+
         # Record successful request for adaptive rate limiting
         if limiter:
             limiter.record_success()
-        
+
     except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
         # Record failure for pool key
         is_http_error = isinstance(e, requests.exceptions.HTTPError)
         status_code = e.response.status_code if is_http_error and e.response is not None else 0
-        
+
         if pool_key:
             if status_code == 429:
                 pool_key.record_rate_limit_hit(status_code=status_code)
@@ -235,7 +233,7 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
                 print(f"[Pool] Key {pool_key.name} hit rate limit, recorded cooldown", file=sys.stderr)
             else:
                 pool_key.record_usage(tokens_used=0, success=False)
-        
+
         raise
 
     if not stream:
@@ -297,11 +295,11 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
         message["tool_calls"] = [
             tool_calls_by_index[i] for i in sorted(tool_calls_by_index)
         ]
-    
+
     # Warn if message appears incomplete (stream interrupted)
     if content and not (content.endswith('.') or content.endswith('!') or content.endswith('?') or content.endswith('```')):
         print("[Warning] Response may be incomplete due to connection interruption", file=sys.stderr)
-    
+
     return message
 
 
@@ -359,12 +357,12 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
                     wait = 10 * (attempt + 1)
                     error_type = status_code if is_http_error else "Connection"
                     print(f"\nAPI error ({error_type}), retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
-                    
+
                     # Record rate limit hit for adaptive rate limiting
                     if status_code == 429 and limiter:
                         limiter.record_rate_limit_hit()
                         print(f"[Rate limit] Recorded 429 error. Adaptive delay may increase.", file=sys.stderr)
-                    
+
                     time.sleep(wait)
                 elif not is_retryable:
                     print(f"\nAPI error: {e}", file=sys.stderr)
@@ -466,16 +464,12 @@ def main():
         watch_path = args.watch_path or os.path.join(os.getcwd(), ".git")
         extra_args = ["--workspace", args.workspace]
         if args.openrouter:
-            invoke_url = args.api_base or OPENROUTER_URL
-            model_name = args.model or get_openrouter_model()
-            api_key = get_openrouter_api_key()
-            if not api_key:
+            extra_args.append("--openrouter")
+            if not get_openrouter_api_key():
                 print("Error: OPENROUTER_API_KEY not found. Please set it in .env.", file=sys.stderr)
                 sys.exit(1)
         elif args.ollama:
             extra_args.append("--ollama")
-        if args.openrouter:
-            extra_args.append("--openrouter")
         if args.model:
             extra_args.extend(["--model", args.model])
         if args.api_base:
@@ -487,20 +481,20 @@ def main():
     strategy = args.rate_limit_strategy
     if strategy is None:
         strategy = DEFAULT_RATE_LIMIT_STRATEGY
-    
+
     if strategy != 'none':
         initial_delay = args.rate_limit_initial_delay
         if initial_delay is None:
             initial_delay = DEFAULT_RATE_LIMIT_INITIAL_DELAY
-        
+
         min_delay = args.rate_limit_min_delay
         if min_delay is None:
             min_delay = DEFAULT_RATE_LIMIT_MIN_DELAY
-        
+
         max_delay = args.rate_limit_max_delay
         if max_delay is None:
             max_delay = DEFAULT_RATE_LIMIT_MAX_DELAY
-        
+
         limiter = init_global_limiter(
             strategy=strategy,
             initial_delay=initial_delay,
@@ -512,7 +506,7 @@ def main():
             print(f" Initial delay: {initial_delay}s, Min: {min_delay}s, Max: {max_delay}s", file=sys.stderr)
     else:
         print("Rate limiting disabled", file=sys.stderr)
-    
+
     # Initialize API key pool if multiple keys configured
     api_keys = parse_api_keys_from_env()
     if len(api_keys) > 1:
@@ -524,7 +518,7 @@ def main():
             print(f"API key pool initialized with {len(api_keys)} keys", file=sys.stderr)
         except ValueError as e:
             print(f"Warning: Failed to initialize key pool: {e}", file=sys.stderr)
-    
+
     if args.openrouter:
         invoke_url = args.api_base or OPENROUTER_URL
         model_name = args.model or get_openrouter_model()
@@ -566,13 +560,9 @@ def main():
             docker.cleanup()
         return
 
+    # Print status message for the chosen API
     if args.openrouter:
-        invoke_url = args.api_base or OPENROUTER_URL
-        model_name = args.model or get_openrouter_model()
-        api_key = get_openrouter_api_key()
-        if not api_key:
-            print("Error: OPENROUTER_API_KEY not found. Please set it in .env.", file=sys.stderr)
-            sys.exit(1)
+        print(f"OpenRouter Coding Agent (Model: {model_name})", file=sys.stderr)
     elif args.ollama:
         print(f"Ollama Coding Agent (Model: {model_name})", file=sys.stderr)
     else:

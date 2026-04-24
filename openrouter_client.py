@@ -8,8 +8,8 @@ unified access to models from Anthropic, OpenAI, Google, Meta, and more.
 import os
 import json
 from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
+import sys
 import requests
 
 from dotenv import load_dotenv
@@ -188,7 +188,7 @@ class OpenRouterClient:
                 
                 # Text content
                 if delta.get("content"):
-                    print(delta["content"], end="", flush=True, file=__import__("sys").stderr)
+                    print(delta["content"], end="", flush=True, file=sys.stderr)
                     content_parts.append(delta["content"])
                 
                 # Tool call deltas
@@ -214,7 +214,7 @@ class OpenRouterClient:
         
         content = "".join(content_parts)
         if content:
-            print(file=__import__("sys").stderr)
+            print(file=sys.stderr)
         
         message = {"role": "assistant"}
         if content:
@@ -263,7 +263,7 @@ class OpenRouterClient:
             response.raise_for_status()
             return response.json().get("data", [])
         except requests.exceptions.RequestException as e:
-            print(f"Error fetching models: {e}", file=__import__("sys").stderr)
+            print(f"Error fetching models: {e}", file=sys.stderr)
             return []
 
 
