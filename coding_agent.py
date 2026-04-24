@@ -11,6 +11,13 @@ import time
 import requests
 from dotenv import load_dotenv
 
+from openrouter_client import (
+    OpenRouterClient,
+    OpenRouterConfig,
+    get_openrouter_api_key,
+    OPENROUTER_MODELS,
+)
+
 from docker_manager import DockerManager
 from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, set_docker_manager
 from rate_limiter import (
@@ -30,6 +37,9 @@ load_dotenv()
 
 INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 MODEL = "moonshotai/kimi-k2.5"
+
+# OpenRouter configuration
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MAX_TOOL_ROUNDS = 250
 
 # Rate limiting configuration
@@ -211,8 +221,8 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
         # Record successful request for adaptive rate limiting
         if limiter:
             limiter.record_success()
-    
-    except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        
+    except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
         # Record failure for pool key
         is_http_error = isinstance(e, requests.exceptions.HTTPError)
         status_code = e.response.status_code if is_http_error and e.response is not None else 0
@@ -287,6 +297,11 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
         message["tool_calls"] = [
             tool_calls_by_index[i] for i in sorted(tool_calls_by_index)
         ]
+    
+    # Warn if message appears incomplete (stream interrupted)
+    if content and not (content.endswith('.') or content.endswith('!') or content.endswith('?') or content.endswith('```')):
+        print("[Warning] Response may be incomplete due to connection interruption", file=sys.stderr)
+    
     return message
 
 
@@ -307,7 +322,7 @@ def execute_tool(name, arguments_str):
     if not handler:
         return json.dumps({"error": f"Unknown tool: {name}"})
 
-    print(f"  -> {name}({', '.join(f'{k}={repr(v)[:60]}' for k, v in args.items())})", file=sys.stderr)
+    print(f" -> {name}({', '.join(f'{k}={repr(v)[:60]}' for k, v in args.items())})", file=sys.stderr)
     return handler(args)
 
 
@@ -331,13 +346,13 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
             try:
                 assistant_msg = call_llm_api(messages, api_key, invoke_url, model, stream=True)
                 break
-            except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
                 is_http_error = isinstance(e, requests.exceptions.HTTPError)
                 status_code = e.response.status_code if is_http_error and e.response is not None else 0
 
                 is_retryable = (
                     (is_http_error and (status_code == 429 or status_code >= 500)) or
-                    isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+                    isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError))
                 )
 
                 if is_retryable and attempt < max_retries:
@@ -375,7 +390,7 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
 
             # Show a preview of the result
             result_preview = result[:200] + ("..." if len(result) > 200 else "")
-            print(f"  <- {result_preview}", file=sys.stderr)
+            print(f" <- {result_preview}", file=sys.stderr)
 
             messages.append({
                 "role": "tool",
@@ -413,6 +428,7 @@ def main():
         help="Workspace directory for the agent sandbox (default: %(default)s)",
     )
     parser.add_argument("--ollama", action="store_true", help="Use local Ollama instead of Nvidia API")
+    parser.add_argument("--openrouter", action="store_true", help="Use OpenRouter API instead of Nvidia API")
     parser.add_argument("--model", type=str, help="Override the model to use (default: gemma4:e4b for Ollama)")
     parser.add_argument("--api-base", type=str, help="Override the API base URL")
     # Rate limiting arguments
@@ -449,9 +465,21 @@ def main():
 
         watch_path = args.watch_path or os.path.join(os.getcwd(), ".git")
         extra_args = ["--workspace", args.workspace]
-        if args.ollama: extra_args.append("--ollama")
-        if args.model: extra_args.extend(["--model", args.model])
-        if args.api_base: extra_args.extend(["--api-base", args.api_base])
+        if args.openrouter:
+            invoke_url = args.api_base or OPENROUTER_URL
+            model_name = args.model or get_openrouter_model()
+            api_key = get_openrouter_api_key()
+            if not api_key:
+                print("Error: OPENROUTER_API_KEY not found. Please set it in .env.", file=sys.stderr)
+                sys.exit(1)
+        elif args.ollama:
+            extra_args.append("--ollama")
+        if args.openrouter:
+            extra_args.append("--openrouter")
+        if args.model:
+            extra_args.extend(["--model", args.model])
+        if args.api_base:
+            extra_args.extend(["--api-base", args.api_base])
         sys.exit(run_with_reload(watch_path, extra_args))
 
     # Initialize rate limiter based on configuration
@@ -481,7 +509,7 @@ def main():
         )
         print(f"Rate limiting enabled: {strategy} strategy", file=sys.stderr)
         if isinstance(limiter._limiter, AdaptiveRateLimiter):
-            print(f"  Initial delay: {initial_delay}s, Min: {min_delay}s, Max: {max_delay}s", file=sys.stderr)
+            print(f" Initial delay: {initial_delay}s, Min: {min_delay}s, Max: {max_delay}s", file=sys.stderr)
     else:
         print("Rate limiting disabled", file=sys.stderr)
     
@@ -497,7 +525,14 @@ def main():
         except ValueError as e:
             print(f"Warning: Failed to initialize key pool: {e}", file=sys.stderr)
     
-    if args.ollama:
+    if args.openrouter:
+        invoke_url = args.api_base or OPENROUTER_URL
+        model_name = args.model or get_openrouter_model()
+        api_key = get_openrouter_api_key()
+        if not api_key:
+            print("Error: OPENROUTER_API_KEY not found. Please set it in .env.", file=sys.stderr)
+            sys.exit(1)
+    elif args.ollama:
         invoke_url = args.api_base or "http://127.0.0.1:11434/v1/chat/completions"
         model_name = args.model or "gemma4:e4b"
         api_key = "ollama"
@@ -531,7 +566,14 @@ def main():
             docker.cleanup()
         return
 
-    if args.ollama:
+    if args.openrouter:
+        invoke_url = args.api_base or OPENROUTER_URL
+        model_name = args.model or get_openrouter_model()
+        api_key = get_openrouter_api_key()
+        if not api_key:
+            print("Error: OPENROUTER_API_KEY not found. Please set it in .env.", file=sys.stderr)
+            sys.exit(1)
+    elif args.ollama:
         print(f"Ollama Coding Agent (Model: {model_name})", file=sys.stderr)
     else:
         print(f"Nvidia Coding Agent (Model: {model_name})", file=sys.stderr)
@@ -565,7 +607,7 @@ def main():
             if reply is not None:
                 conversation_history.append({"role": "user", "content": user_input})
                 conversation_history.append({"role": "assistant", "content": reply})
-            print()
+                print()
     finally:
         docker.cleanup()
 
