@@ -17,7 +17,7 @@ from openrouter_client import (
 )
 
 from docker_manager import DockerManager
-from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, set_docker_manager
+from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, set_docker_manager, set_mcp_client
 from mcp_client import (
     MCPClient,
  init_mcp,
