@@ -18,6 +18,12 @@ from openrouter_client import (
 
 from docker_manager import DockerManager
 from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, set_docker_manager
+from mcp_client import (
+    MCPClient,
+ init_mcp,
+ 
+ 
+)
 from rate_limiter import (
     RateLimitManager,
     AdaptiveRateLimiter,
@@ -543,6 +549,15 @@ def main():
     # Initialize Docker sandbox with the dedicated workspace.
     docker = DockerManager(work_dir=args.workspace)
     set_docker_manager(docker)
+
+    # Initialize MCP servers
+    mcp_client = init_mcp()
+    if mcp_client:
+        set_mcp_client(mcp_client)
+        # Refresh MCP tools into TOOL_DEFINITIONS
+        from tools import refresh_mcp_tools
+        refresh_mcp_tools(mcp_client)
+        print(f"MCP support: {len(mcp_client.servers)} server(s) connected, {len(TOOL_DEFINITIONS)} total tools available", file=sys.stderr)
 
     if args.serve:
         from telegram_bot import run_telegram_bot

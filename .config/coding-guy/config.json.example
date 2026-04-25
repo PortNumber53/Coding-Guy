@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "jira-thing": {
+      "command": "/opt/homebrew/bin/npx",
+      "args": [
+        "mcp-remote",
+        "https://jira-thing.truvis.co/mcp?mcp_secret=dfff55133152592adc8dfd55e36b53306d3ad27fe4c54785de0ae58668eb8808"
+      ],
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/bin:/bin"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/files"],
+      "env": {}
+    }
+  }
+}

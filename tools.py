@@ -1,26 +1,52 @@
 """Tools the coding agent can call, executing inside a Docker sandbox."""
 
-import difflib
 import inspect
 import json
 import os
 import shlex
+import difflib
 
 import requests
 from bs4 import BeautifulSoup
 try:
-    from playwright.sync_api import sync_playwright
+ from playwright.sync_api import sync_playwright
 except ImportError:
-    sync_playwright = None
+ sync_playwright = None
 
 # Import Suno client tools
 from suno_client import (
-    suno_generate_song,
-    suno_get_job_status,
-    suno_get_song_data,
-    suno_list_songs,
-    suno_delete_song,
+ suno_generate_song,
+ suno_get_job_status,
+ suno_get_song_data,
+ suno_list_songs,
+ suno_delete_song,
 )
+
+# MCP support
+_mcp_client = None
+_mcp_tools_loaded = False
+
+def set_mcp_client(client):
+    """Set the MCP client from coding_agent.py."""
+    global _mcp_client, _mcp_tools_loaded
+    _mcp_client = client
+    _mcp_tools_loaded = True
+
+
+def _init_mcp_tools():
+    """Initialize MCP tools if config exists."""
+    global _mcp_client, _mcp_tools_loaded
+    if _mcp_tools_loaded:
+        return
+
+    try:
+        from mcp_client import get_mcp_client
+        _mcp_client = get_mcp_client()
+    except Exception:
+        pass
+
+    _mcp_tools_loaded = True
+
 
 # ---------------------------------------------------------------------------
 # Docker manager reference (set from coding_agent.py at startup)
@@ -315,7 +341,6 @@ def browser_navigate(url: str, wait_until: str = "load", timeout: int = 60000) -
             "status": "navigated"
         })
     except Exception as e:
-        # If it's just a timeout, we might still have some content
         return json.dumps({
             "url": page.url if 'page' in locals() else url,
             "title": page.title() if 'page' in locals() else "Unknown",
@@ -325,7 +350,7 @@ def browser_navigate(url: str, wait_until: str = "load", timeout: int = 60000) -
 
 
 def browser_action(action: str, selector: str | None = None, text: str | None = None,
-                  key: str | None = None) -> str:
+                   key: str | None = None) -> str:
     """Perform an action on the current page.
     Supported actions: click, type, press, wait_for_selector, wait_for_timeout.
     """
@@ -358,25 +383,21 @@ def browser_get_content(include_images: bool = False) -> str:
         content = page.content()
         soup = BeautifulSoup(content, "html.parser")
         
-        # Remove script and style elements
         for script_or_style in soup(["script", "style", "meta", "link", "noscript"]):
             script_or_style.decompose()
         
         if include_images:
-            # Replace images with a text representation
             for img in soup.find_all("img"):
                 src = img.get("src", "")
                 alt = img.get("alt", "")
                 if src:
                     img.replace_with(f"\n[IMAGE: {src} | ALT: {alt}]\n")
 
-        # Get text and clean it up
         text = soup.get_text(separator="\n")
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split(" "))
         clean_text = "\n".join(chunk for chunk in chunks if chunk)
         
-        # Limit output
         max_len = 30000
         truncated = len(clean_text) > max_len
         
@@ -391,17 +412,13 @@ def browser_get_content(include_images: bool = False) -> str:
 
 
 def browser_get_elements(selector: str, attributes: list[str] | None = None) -> str:
-    """Get details of elements matching a CSS selector.
-    attributes: optional list of attribute names to extract (e.g. ["src", "href", "aria-label"]).
-    """
+    """Get details of elements matching a CSS selector."""
     try:
         page = _get_browser_page()
         elements = page.query_selector_all(selector)
         results = []
         for el in elements:
-            data = {
-                "text": el.inner_text(),
-            }
+            data = {"text": el.inner_text()}
             if attributes:
                 for attr in attributes:
                     data[attr] = el.get_attribute(attr)
@@ -410,7 +427,7 @@ def browser_get_elements(selector: str, attributes: list[str] | None = None) -> 
         return json.dumps({
             "selector": selector,
             "count": len(results),
-            "elements": results[:100]  # Limit to 100 results
+            "elements": results[:100]
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -434,585 +451,634 @@ def browser_close() -> str:
 
 # --- Tool definitions for the OpenAI-compatible tool-calling API ---
 
-TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read the contents of a file at the given path.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to read."
-                    }
-                },
-                "required": ["path"]
-            }
-        }
+_BASE_TOOL_DEFINITIONS = [
+ {
+  "type": "function",
+  "function": {
+   "name": "read_file",
+   "description": "Read the contents of a file at the given path.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Path to the file to read."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write content to a file, creating it and parent directories if needed.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to write."
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The content to write to the file."
-                    }
-                },
-                "required": ["path", "content"]
-            }
-        }
+    "required": ["path"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "write_file",
+   "description": "Write content to a file, creating it and parent directories if needed.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Path to the file to write."
+     },
+     "content": {
+      "type": "string",
+      "description": "The content to write to the file."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "patch_file",
-            "description": (
-                "Apply search-and-replace patches to an existing file. "
-                "Each patch replaces only the *first* occurrence of an 'old' string with a 'new' string. "
-                "Patches are applied in order. Use this for targeted edits instead of rewriting entire files."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to patch."
-                    },
-                    "patches": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "old": {
-                                    "type": "string",
-                                    "description": "The exact text to find in the file."
-                                },
-                                "new": {
-                                    "type": "string",
-                                    "description": "The replacement text."
-                                }
-                            },
-                            "required": ["old", "new"]
-                        },
-                        "description": "List of search-and-replace patches to apply."
-                    }
-                },
-                "required": ["path", "patches"]
-            }
+    "required": ["path", "content"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "patch_file",
+   "description": (
+    "Apply search-and-replace patches to an existing file. "
+    "Each patch replaces only the *first* occurrence of an 'old' string with a 'new' string. "
+    "Patches are applied in order. Use this for targeted edits instead of rewriting entire files."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Path to the file to patch."
+     },
+     "patches": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "old": {
+         "type": "string",
+         "description": "The exact text to find in the file."
+        },
+        "new": {
+         "type": "string",
+         "description": "The replacement text."
         }
+       },
+       "required": ["old", "new"]
+      },
+      "description": "List of search-and-replace patches to apply."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "grep_file",
-            "description": (
-                "Search for a regex pattern in files. Returns matching lines with "
-                "line numbers. Useful for finding code, functions, variables, or "
-                "any text pattern across the project."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "The regex pattern to search for."
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "File or directory to search in (default: current directory)."
-                    },
-                    "recursive": {
-                        "type": "boolean",
-                        "description": "Search recursively in subdirectories (default: true)."
-                    }
-                },
-                "required": ["pattern"]
-            }
+    "required": ["path", "patches"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "grep_file",
+   "description": (
+    "Search for a regex pattern in files. Returns matching lines with "
+    "line numbers. Useful for finding code, functions, variables, or "
+    "any text pattern across the project."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "pattern": {
+      "type": "string",
+      "description": "The regex pattern to search for."
+     },
+     "path": {
+      "type": "string",
+      "description": "File or directory to search in (default: current directory)."
+     },
+     "recursive": {
+      "type": "boolean",
+      "description": "Search recursively in subdirectories (default: true)."
+     }
+    },
+    "required": ["pattern"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "ls_file",
+   "description": "List the contents of a directory with details (permissions, size, dates).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Directory path to list (default: current directory)."
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "execute_command",
+   "description": (
+    "Execute a shell command inside the Docker sandbox. Use this to "
+    "run builds, tests, scripts, install packages, or any shell command. "
+    "Returns stdout, stderr, and exit code."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "command": {
+      "type": "string",
+      "description": "The shell command to execute (run via bash -c)."
+     },
+     "working_dir": {
+      "type": "string",
+      "description": "Optional working directory (default: /workspace)."
+     }
+    },
+    "required": ["command"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "multi_read_file",
+   "description": "Read multiple files at once. Returns an array of results, each with path and content (or error).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "paths": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "List of file paths to read."
+     }
+    },
+    "required": ["paths"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "multi_write_file",
+   "description": "Write multiple files at once. Each entry needs a path and content. Creates parent directories as needed.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "files": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string",
+         "description": "Path to the file to write."
+        },
+        "content": {
+         "type": "string",
+         "description": "The content to write to the file."
         }
+       },
+       "required": ["path", "content"]
+      },
+      "description": "List of files to write, each with path and content."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "ls_file",
-            "description": "List the contents of a directory with details (permissions, size, dates).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Directory path to list (default: current directory)."
-                    }
-                },
-                "required": []
-            }
-        }
+    "required": ["files"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "rebuild_container",
+   "description": (
+    "Rebuild and restart the Docker sandbox. Use this after calling "
+    "write_dockerfile to apply Dockerfile changes. The workspace "
+    "files are preserved across rebuilds."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "read_dockerfile",
+   "description": (
+    "Read the current Dockerfile used to build the sandbox. "
+    "Returns the content whether it's a custom Dockerfile or the "
+    "embedded default. This reads from the host, not inside the container."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "write_dockerfile",
+   "description": (
+    "Write or update the Dockerfile used to build the sandbox. "
+    "This writes to the host filesystem. After writing, call "
+    "rebuild_container to apply the changes."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "content": {
+      "type": "string",
+      "description": "The full Dockerfile content."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_command",
-            "description": (
-                "Execute a shell command inside the Docker sandbox. Use this to "
-                "run builds, tests, scripts, install packages, or any shell command. "
-                "Returns stdout, stderr, and exit code."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to execute (run via bash -c)."
-                    },
-                    "working_dir": {
-                        "type": "string",
-                        "description": "Optional working directory (default: /workspace)."
-                    }
-                },
-                "required": ["command"]
-            }
-        }
+    "required": ["content"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "web",
+   "description": (
+    "Make an HTTP request. Use this to fetch web pages, call APIs, "
+    "download documentation, etc."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "url": {
+      "type": "string",
+      "description": "The URL to request."
+     },
+     "method": {
+      "type": "string",
+      "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
+      "description": "HTTP method (default: GET)."
+     },
+     "headers": {
+      "type": "object",
+      "description": "Optional HTTP headers as key-value pairs."
+     },
+     "body": {
+      "type": "string",
+      "description": "Optional request body (for POST/PUT/PATCH)."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "multi_read_file",
-            "description": "Read multiple files at once. Returns an array of results, each with path and content (or error).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of file paths to read."
-                    }
-                },
-                "required": ["paths"]
-            }
-        }
+    "required": ["url"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "ask_ollama",
+   "description": (
+    "Delegate a sub-task or ask a question to a local Ollama model. "
+    "Useful for text generation, summarizing, or analyzing data using a local open-source model."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "description": "The prompt or task instruction to send to Ollama."
+     },
+     "model": {
+      "type": "string",
+      "description": "The Ollama model to use (default: gemma4:e4b)."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "multi_write_file",
-            "description": "Write multiple files at once. Each entry needs a path and content. Creates parent directories as needed.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "files": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "path": {
-                                    "type": "string",
-                                    "description": "Path to the file to write."
-                                },
-                                "content": {
-                                    "type": "string",
-                                    "description": "The content to write to the file."
-                                }
-                            },
-                            "required": ["path", "content"]
-                        },
-                        "description": "List of files to write, each with path and content."
-                    }
-                },
-                "required": ["files"]
-            }
-        }
+    "required": ["prompt"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "browser_navigate",
+   "description": "Navigate to a URL using a headless browser.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "url": {
+      "type": "string",
+      "description": "The URL to navigate to."
+     },
+     "wait_until": {
+      "type": "string",
+      "enum": ["load", "domcontentloaded", "networkidle", "commit"],
+      "description": "When to consider navigation finished (default: load)."
+     },
+     "timeout": {
+      "type": "integer",
+      "description": "Maximum time in milliseconds (default: 60000)."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "rebuild_container",
-            "description": (
-                "Rebuild and restart the Docker sandbox. Use this after calling "
-                "write_dockerfile to apply Dockerfile changes. The workspace "
-                "files are preserved across rebuilds."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
+    "required": ["url"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "browser_action",
+   "description": "Perform an action like click, type, or press on the current page.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "action": {
+      "type": "string",
+      "enum": ["click", "type", "press", "wait_for_selector", "wait_for_timeout"],
+      "description": "The action to perform."
+     },
+     "selector": {
+      "type": "string",
+      "description": "The CSS or Playwright selector for the element."
+     },
+     "text": {
+      "type": "string",
+      "description": "The text to type (for 'type' or 'wait_for_timeout')."
+     },
+     "key": {
+      "type": "string",
+      "description": "The key to press (for 'press')."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_dockerfile",
-            "description": (
-                "Read the current Dockerfile used to build the sandbox. "
-                "Returns the content whether it's a custom Dockerfile or the "
-                "embedded default. This reads from the host, not inside the container."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
+    "required": ["action"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "browser_get_content",
+   "description": "Get the text content of the current page, cleaned of HTML tags and scripts.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "include_images": {
+      "type": "boolean",
+      "description": "Whether to include image URLs and alt text in the output (default: false)."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_dockerfile",
-            "description": (
-                "Write or update the Dockerfile used to build the sandbox. "
-                "This writes to the host filesystem. After writing, call "
-                "rebuild_container to apply the changes."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The full Dockerfile content."
-                    }
-                },
-                "required": ["content"]
-            }
-        }
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "browser_get_elements",
+   "description": "Extract text and attributes from elements matching a CSS selector.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "selector": {
+      "type": "string",
+      "description": "The CSS or Playwright selector to find elements."
+     },
+     "attributes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "List of attribute names to extract from each matching element."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "web",
-            "description": (
-                "Make an HTTP request. Use this to fetch web pages, call APIs, "
-                "download documentation, etc."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The URL to request."
-                    },
-                    "method": {
-                        "type": "string",
-                        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
-                        "description": "HTTP method (default: GET)."
-                    },
-                    "headers": {
-                        "type": "object",
-                        "description": "Optional HTTP headers as key-value pairs."
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Optional request body (for POST/PUT/PATCH)."
-                    }
-                },
-                "required": ["url"]
-            }
-        }
+    "required": ["selector"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "browser_close",
+   "description": "Close the browser and release resources.",
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "suno_generate_song",
+   "description": (
+    "Generate an AI song using Suno. Creates a musical composition with vocals based on provided lyrics and style. "
+    "Returns a job ID that can be used to check generation status. "
+    "Use wait_for_completion=True to poll until the song is ready."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "lyrics": {
+      "type": "string",
+      "description": "The lyrics for the song. Can be multiple lines with verses and chorus."
+     },
+     "style": {
+      "type": "string",
+      "description": "Musical style/genre description (e.g., 'Upbeat electronic pop with female vocals', 'Acoustic folk ballad', 'Rap with heavy beat')."
+     },
+     "title": {
+      "type": "string",
+      "description": "Optional title for the song."
+     },
+     "wait_for_completion": {
+      "type": "boolean",
+      "description": "If true, wait for generation to complete and return full song data. Default: false (returns job_id only)."
+     },
+     "timeout": {
+      "type": "integer",
+      "description": "Maximum seconds to wait for completion if wait_for_completion=True. Default: 300."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "ask_ollama",
-            "description": (
-                "Delegate a sub-task or ask a question to a local Ollama model. "
-                "Useful for text generation, summarizing, or analyzing data using a local open-source model."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "The prompt or task instruction to send to Ollama."
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "The Ollama model to use (default: gemma4:e4b)."
-                    }
-                },
-                "required": ["prompt"]
-            }
-        }
+    "required": ["lyrics", "style"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "suno_get_job_status",
+   "description": (
+    "Check the status of a song generation job submitted to Suno. "
+    "Returns current status (pending, processing, completed, failed) and progress information."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "job_id": {
+      "type": "string",
+      "description": "The job ID returned from suno_generate_song."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "browser_navigate",
-            "description": "Navigate to a URL using a headless browser.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The URL to navigate to."
-                    },
-                    "wait_until": {
-                        "type": "string",
-                        "enum": ["load", "domcontentloaded", "networkidle", "commit"],
-                        "description": "When to consider navigation finished (default: load)."
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Maximum time in milliseconds (default: 60000)."
-                    }
-                },
-                "required": ["url"]
-            }
-        }
+    "required": ["job_id"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "suno_get_song_data",
+   "description": (
+    "Retrieve complete metadata and URLs for a generated song from Suno. "
+    "Includes title, artist, duration, audio download URLs, and cover image. "
+    "Use this after a job status shows 'completed'."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "song_id": {
+      "type": "string",
+      "description": "The song ID from a completed job, obtained via suno_get_job_status."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "browser_action",
-            "description": "Perform an action like click, type, or press on the current page.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["click", "type", "press", "wait_for_selector", "wait_for_timeout"],
-                        "description": "The action to perform."
-                    },
-                    "selector": {
-                        "type": "string",
-                        "description": "The CSS or Playwright selector for the element."
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "The text to type (for 'type' or 'wait_for_timeout')."
-                    },
-                    "key": {
-                        "type": "string",
-                        "description": "The key to press (for 'press')."
-                    }
-                },
-                "required": ["action"]
-            }
-        }
+    "required": ["song_id"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "suno_list_songs",
+   "description": (
+    "List all songs generated by the user in Suno. "
+    "Supports pagination and status filtering."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "limit": {
+      "type": "integer",
+      "description": "Number of results to return (default: 20, max: 100)."
+     },
+     "offset": {
+      "type": "integer",
+      "description": "Pagination offset for fetching more results. Default: 0."
+     },
+     "status": {
+      "type": "string",
+      "enum": ["pending", "processing", "completed", "failed"],
+      "description": "Optional filter by song status."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "browser_get_content",
-            "description": "Get the text content of the current page, cleaned of HTML tags and scripts.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "include_images": {
-                        "type": "boolean",
-                        "description": "Whether to include image URLs and alt text in the output (default: false)."
-                    }
-                },
-                "required": []
-            }
-        }
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "suno_delete_song",
+   "description": (
+    "Delete a generated song from Suno. "
+    "This permanently removes the song and all associated data."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "song_id": {
+      "type": "string",
+      "description": "The song ID to delete."
+     }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "browser_get_elements",
-            "description": "Extract text and attributes from elements matching a CSS selector.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "The CSS or Playwright selector to find elements."
-                    },
-                    "attributes": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of attribute names to extract from each matching element."
-                    }
-                },
-                "required": ["selector"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "browser_close",
-            "description": "Close the browser and release resources.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "suno_generate_song",
-            "description": (
-                "Generate an AI song using Suno. Creates a musical composition with vocals based on provided lyrics and style. "
-                "Returns a job ID that can be used to check generation status. "
-                "Use wait_for_completion=True to poll until the song is ready."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "lyrics": {
-                        "type": "string",
-                        "description": "The lyrics for the song. Can be multiple lines with verses and chorus."
-                    },
-                    "style": {
-                        "type": "string",
-                        "description": "Musical style/genre description (e.g., 'Upbeat electronic pop with female vocals', 'Acoustic folk ballad', 'Rap with heavy beat')."
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Optional title for the song."
-                    },
-                    "wait_for_completion": {
-                        "type": "boolean",
-                        "description": "If true, wait for generation to complete and return full song data. Default: false (returns job_id only)."
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Maximum seconds to wait for completion if wait_for_completion=True. Default: 300."
-                    }
-                },
-                "required": ["lyrics", "style"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "suno_get_job_status",
-            "description": (
-                "Check the status of a song generation job submitted to Suno. "
-                "Returns current status (pending, processing, completed, failed) and progress information."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "job_id": {
-                        "type": "string",
-                        "description": "The job ID returned from suno_generate_song."
-                    }
-                },
-                "required": ["job_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "suno_get_song_data",
-            "description": (
-                "Retrieve complete metadata and URLs for a generated song from Suno. "
-                "Includes title, artist, duration, audio download URLs, and cover image. "
-                "Use this after a job status shows 'completed'."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "song_id": {
-                        "type": "string",
-                        "description": "The song ID from a completed job, obtained via suno_get_job_status."
-                    }
-                },
-                "required": ["song_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "suno_list_songs",
-            "description": (
-                "List all songs generated by the user in Suno. "
-                "Supports pagination and status filtering."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "description": "Number of results to return (default: 20, max: 100)."
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Pagination offset for fetching more results. Default: 0."
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["pending", "processing", "completed", "failed"],
-                        "description": "Optional filter by song status."
-                    }
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "suno_delete_song",
-            "description": (
-                "Delete a generated song from Suno. "
-                "This permanently removes the song and all associated data."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "song_id": {
-                        "type": "string",
-                        "description": "The song ID to delete."
-                    }
-                },
-                "required": ["song_id"]
-            }
-        }
-    },
+    "required": ["song_id"]
+   }
+  }
+ },
 ]
 
 
 def _make_handler(func):
-    """Create a handler that filters out unexpected keyword arguments."""
-    valid_params = set(inspect.signature(func).parameters.keys())
+ """Create a handler that filters out unexpected keyword arguments."""
+ valid_params = set(inspect.signature(func).parameters.keys())
 
-    def handler(args):
-        filtered = {k: v for k, v in args.items() if k in valid_params}
-        return func(**filtered)
+ def handler(args):
+  filtered = {k: v for k, v in args.items() if k in valid_params}
+  return func(**filtered)
 
-    return handler
+ return handler
 
 
 # Map function names to callables (handlers filter unexpected kwargs from LLM)
-TOOL_HANDLERS = {
-    "read_file": _make_handler(read_file),
-    "write_file": _make_handler(write_file),
-    "patch_file": _make_handler(patch_file),
-    "grep_file": _make_handler(grep_file),
-    "ls_file": _make_handler(ls_file),
-    "execute_command": _make_handler(execute_command),
-    "multi_read_file": _make_handler(multi_read_file),
-    "multi_write_file": _make_handler(multi_write_file),
-    "rebuild_container": lambda args: rebuild_container(),
-    "read_dockerfile": lambda args: read_dockerfile(),
-    "write_dockerfile": _make_handler(write_dockerfile),
-    "web": _make_handler(web),
-    "ask_ollama": _make_handler(ask_ollama),
-    "browser_navigate": _make_handler(browser_navigate),
-    "browser_action": _make_handler(browser_action),
-    "browser_get_content": _make_handler(browser_get_content),
-    "browser_get_elements": _make_handler(browser_get_elements),
-    "browser_close": _make_handler(browser_close),
-    "suno_generate_song": _make_handler(suno_generate_song),
-    "suno_get_job_status": _make_handler(suno_get_job_status),
-    "suno_get_song_data": _make_handler(suno_get_song_data),
-    "suno_list_songs": _make_handler(suno_list_songs),
-    "suno_delete_song": _make_handler(suno_delete_song),
+_BASE_TOOL_HANDLERS = {
+ "read_file": _make_handler(read_file),
+ "write_file": _make_handler(write_file),
+ "patch_file": _make_handler(patch_file),
+ "grep_file": _make_handler(grep_file),
+ "ls_file": _make_handler(ls_file),
+ "execute_command": _make_handler(execute_command),
+ "multi_read_file": _make_handler(multi_read_file),
+ "multi_write_file": _make_handler(multi_write_file),
+ "rebuild_container": lambda args: rebuild_container(),
+ "read_dockerfile": lambda args: read_dockerfile(),
+ "write_dockerfile": _make_handler(write_dockerfile),
+ "web": _make_handler(web),
+ "ask_ollama": _make_handler(ask_ollama),
+ "browser_navigate": _make_handler(browser_navigate),
+ "browser_action": _make_handler(browser_action),
+ "browser_get_content": _make_handler(browser_get_content),
+ "browser_get_elements": _make_handler(browser_get_elements),
+ "browser_close": _make_handler(browser_close),
+ "suno_generate_song": _make_handler(suno_generate_song),
+ "suno_get_job_status": _make_handler(suno_get_job_status),
+ "suno_get_song_data": _make_handler(suno_get_song_data),
+ "suno_list_songs": _make_handler(suno_list_songs),
+ "suno_delete_song": _make_handler(suno_delete_song),
 }
+
+
+# Export combined definitions and handlers
+TOOL_DEFINITIONS = _BASE_TOOL_DEFINITIONS.copy()
+TOOL_HANDLERS = _BASE_TOOL_HANDLERS.copy()
+
+
+def refresh_mcp_tools(mcp_client=None):
+    """Refresh MCP tools - called by coding_agent.py after MCP initialization.
+    
+    This function merges MCP tools into TOOL_DEFINITIONS and TOOL_HANDLERS.
+    """
+    global TOOL_DEFINITIONS, TOOL_HANDLERS, _mcp_client, _mcp_tools_loaded
+    
+    if mcp_client:
+        _mcp_client = mcp_client
+        _mcp_tools_loaded = True
+    
+    if not _mcp_client:
+        return [], {}
+    
+    # Get MCP tools and convert to OpenAI format
+    tools = _mcp_client.get_all_tools()
+    definitions = []
+    for tool in tools:
+        definitions.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", f"MCP tool from {tool.get('_mcp_server', 'unknown')}"),
+                "parameters": tool.get("parameters", {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                })
+            }
+        })
+    
+    # Create handlers for MCP tools
+    handlers = {}
+    for tool in tools:
+        name = tool["name"]
+        handlers[name] = lambda args, tn=name, client=_mcp_client: json.dumps(client.call_tool(tn, args or {}))
+    
+    # Merge into global tools
+    TOOL_DEFINITIONS = _BASE_TOOL_DEFINITIONS + definitions
+    TOOL_HANDLERS = {**_BASE_TOOL_HANDLERS, **handlers}
+    
+    return definitions, handlers
