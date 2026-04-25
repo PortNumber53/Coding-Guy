@@ -12,7 +12,6 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import json
 
 
 class MCPServer:
@@ -39,7 +38,7 @@ class MCPServer:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=sys.stderr,  # Avoid deadlock from unserved stderr pipe
                 text=True,
                 env=env,
                 bufsize=1
@@ -70,7 +69,12 @@ class MCPServer:
                 print(f"[MCP] No response from server '{self.name}'", file=sys.stderr)
                 return False
             
-            response = json.loads(response_line)
+            try:
+                response = json.loads(response_line)
+            except json.JSONDecodeError as e:
+                print(f"[MCP] Failed to parse init response from '{self.name}': {e}", file=sys.stderr)
+                return False
+            
             if "error" in response:
                 print(f"[MCP] Init error for '{self.name}': {response['error']}", file=sys.stderr)
                 return False
@@ -117,7 +121,11 @@ class MCPServer:
             if not response_line:
                 return []
             
-            response = json.loads(response_line)
+            try:
+                response = json.loads(response_line)
+            except json.JSONDecodeError:
+                return []
+            
             if "error" in response:
                 return []
             
@@ -153,7 +161,11 @@ class MCPServer:
                 if not response_line:
                     return {"error": "No response from server"}
                 
-                response = json.loads(response_line)
+                try:
+                    response = json.loads(response_line)
+                except json.JSONDecodeError as e:
+                    return {"error": f"Failed to parse response: {str(e)}"}
+                
                 if "error" in response:
                     return {"error": response["error"]}
                 
