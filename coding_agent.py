@@ -21,8 +21,8 @@ from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, set_docker_manager, set_mcp_c
 from mcp_client import (
     MCPClient,
  init_mcp,
- 
- 
+
+
 )
 from rate_limiter import (
     RateLimitManager,
@@ -424,7 +424,7 @@ def main():
     parser.add_argument(
         "--watch-path",
         default=None,
-        help="Directory to watch for hot-reload (default: .git in current directory)",
+        help="Directory to watch for hot-reload (default: current directory)",
     )
     parser.add_argument(
         "--workspace",
@@ -467,7 +467,7 @@ def main():
     if args.serve and args.reload:
         from hot_reload import run_with_reload
 
-        watch_path = args.watch_path or os.path.join(os.getcwd(), ".git")
+        watch_path = args.watch_path or os.getcwd()
         extra_args = ["--workspace", args.workspace]
         if args.openrouter:
             extra_args.append("--openrouter")

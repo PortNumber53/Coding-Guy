@@ -24,11 +24,66 @@ class _ReloadHandler(FileSystemEventHandler):
     def __init__(self):
         self.triggered = False
         self._last_activity = 0
+        self._last_event_path: str | None = None
+        self._mtimes_ns: dict[str, int] = {}
 
     def on_any_event(self, event):
-        # Ignore common temporary files that don't warrant a restart
-        if any(x in event.src_path for x in (".lock", ".tmp", "__pycache__")):
+        src_path = getattr(event, "src_path", "") or ""
+
+        # Ignore directory-level events.
+        if getattr(event, "is_directory", False):
             return
+
+        # Only treat actual content/metadata changes as restart triggers.
+        # Some backends emit opened/closed events for reads which would otherwise
+        # cause an infinite restart loop on startup.
+        event_type = getattr(event, "event_type", None)
+        if event_type not in {"modified", "created", "moved", "deleted"}:
+            return
+
+        # watchdog may report "modified" for metadata-only changes (e.g. atime updates
+        # when a file is merely read). Only trigger reload if the file's mtime changed.
+        if event_type == "modified" and src_path:
+            try:
+                mtime_ns = os.stat(src_path).st_mtime_ns
+            except OSError:
+                # If the file disappeared between event and stat, treat it as a real change.
+                mtime_ns = -1
+            prev = self._mtimes_ns.get(src_path)
+            if prev is not None and prev == mtime_ns:
+                return
+            self._mtimes_ns[src_path] = mtime_ns
+
+        # Ignore noisy paths/files that commonly change and should not restart the server.
+        ignored_parts = (
+            f"{os.sep}.git{os.sep}",
+            f"{os.sep}__pycache__{os.sep}",
+            f"{os.sep}.pytest_cache{os.sep}",
+            f"{os.sep}.mypy_cache{os.sep}",
+            f"{os.sep}.ruff_cache{os.sep}",
+            f"{os.sep}.venv{os.sep}",
+            f"{os.sep}node_modules{os.sep}",
+        )
+        if any(part in src_path for part in ignored_parts):
+            return
+
+        ignored_substrings = (".lock", ".tmp", ".swp", ".swo")
+        if any(x in src_path for x in ignored_substrings):
+            return
+
+        # Ignore environment files which can be touched by external tooling and
+        # can cause restart loops.
+        base = os.path.basename(src_path)
+        if base == ".env" or base.startswith(".env."):
+            return
+
+        # Only restart on changes that are likely to affect the running server.
+        allowed_exts = (".py", ".json", ".toml", ".yaml", ".yml")
+        _, ext = os.path.splitext(src_path)
+        if ext and ext.lower() not in allowed_exts:
+            return
+
+        self._last_event_path = src_path
         self._last_activity = time.monotonic()
 
     def check_settled(self):
@@ -93,7 +148,8 @@ def run_with_reload(watch_path: str, extra_args: list[str] | None = None) -> int
             observer.join()
 
         # Change detected - terminate the running server and restart.
-        print("[hot-reload] Change detected, restarting server…", file=sys.stderr)
+        reason = f" (trigger: {handler._last_event_path})" if handler._last_event_path else ""
+        print(f"[hot-reload] Change detected, restarting server…{reason}", file=sys.stderr)
         proc.terminate()
         try:
             # Give more time for graceful shutdown - allow Telegram messages to complete
