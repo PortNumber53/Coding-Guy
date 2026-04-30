@@ -360,7 +360,8 @@ def _parse_tool_args(arguments_str: str) -> dict:
         except json.JSONDecodeError:
             pass
     args = {}
-    pattern = re.compile(r'"(\w+)"\s*:\s*(?:"([^"]*)"|(\d+(?:\.\d+)?)|true|false|null)')
+    # Handles escaped quotes inside string values (e.g. "val with \"quote\"")
+    pattern = re.compile(r'"(\w+)"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(\d+(?:\.\d+)?)|true|false|null)')
     for m in pattern.finditer(text):
         key = m.group(1)
         if m.group(2) is not None:
@@ -479,9 +480,9 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
             if fn_name == "ask_human":
                 asked_human = True
                 try:
-                    args = json.loads(fn_args)
+                    args = _parse_tool_args(fn_args)
                     human_question = args.get("question", "Human input needed")
-                except json.JSONDecodeError:
+                except Exception:
                     human_question = "Human input needed"
                 break
 

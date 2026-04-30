@@ -162,12 +162,12 @@ class TaskManager:
             if cached.display_id == task_id[:8]:
                 return cached.uuid
 
-        # Scan persisted tasks
+        # Scan persisted tasks — display_id is the first 8 chars of the UUID,
+        # so we can match directly without loading the full task object.
         index = self.db.get(TASK_INDEX_KEY) or []
         for uuid in index:
-            task = self._load_task(uuid)
-            if task and task.display_id == task_id[:8]:
-                return task.uuid
+            if uuid.startswith(task_id[:8]):
+                return uuid
 
         return None
 
