@@ -97,12 +97,16 @@ def write_file(path: str, content: str) -> str:
     return json.dumps({"path": path, "status": "written", "size": len(content)})
 
 
-def patch_file(path: str, patches: list[dict]) -> str:
+def patch_file(path: str = "", patches: list[dict] | None = None) -> str:
     """Apply search-and-replace patches to a file inside the Docker container.
 
     Each patch is {"old": "text to find", "new": "replacement text"}.
     Patches are applied in order.
     """
+    if not path:
+        return json.dumps({"error": "Missing required argument: path"})
+    if not patches:
+        return json.dumps({"error": "Missing or empty required argument: patches"})
     dm = _get_docker_manager()
     rc, content, stderr = dm.exec(["cat", path])
     if rc != 0:
@@ -195,8 +199,10 @@ def execute_command(command: str, working_dir: str | None = None) -> str:
     })
 
 
-def multi_read_file(paths: list[str]) -> str:
+def multi_read_file(paths: list[str] | None = None) -> str:
     """Read multiple files inside the Docker container in one call."""
+    if not paths:
+        return json.dumps({"error": "Missing or empty required argument: paths"})
     dm = _get_docker_manager()
     results = []
     for path in paths:
@@ -208,8 +214,10 @@ def multi_read_file(paths: list[str]) -> str:
     return json.dumps({"results": results})
 
 
-def multi_write_file(files: list[dict]) -> str:
+def multi_write_file(files: list[dict] | None = None) -> str:
     """Write multiple files inside the Docker container in one call."""
+    if not files:
+        return json.dumps({"error": "Missing or empty required argument: files"})
     dm = _get_docker_manager()
     results = []
     for entry in files:
@@ -484,8 +492,10 @@ def set_task_session_key(key: str):
     _task_session_key = key
 
 
-def create_task(description: str, steps: list[str] | None = None) -> str:
+def create_task(description: str = "", steps: list[str] | None = None) -> str:
     """Create a tracked task with optional ordered steps."""
+    if not description:
+        return json.dumps({"error": "Missing required argument: description"})
     tm = get_task_manager()
     session_key = _task_session_key or "default"
     task = tm.create_task(description, steps=steps, session_key=session_key)
@@ -498,9 +508,15 @@ def create_task(description: str, steps: list[str] | None = None) -> str:
     })
 
 
-def update_task_step(task_id: str, step_index: int, status: str,
+def update_task_step(task_id: str = "", step_index: int = -1, status: str = "",
                      result: str | None = None, error: str | None = None) -> str:
     """Update a task step's status. Status: in_progress, completed, failed, skipped."""
+    if not task_id:
+        return json.dumps({"error": "Missing required argument: task_id"})
+    if step_index < 0:
+        return json.dumps({"error": "Missing or invalid required argument: step_index"})
+    if not status:
+        return json.dumps({"error": "Missing required argument: status"})
     tm = get_task_manager()
     task = tm.update_step(task_id, step_index, status, result=result, error=error)
     if not task:
@@ -513,8 +529,10 @@ def update_task_step(task_id: str, step_index: int, status: str,
     })
 
 
-def complete_task(task_id: str, result: str | None = None) -> str:
+def complete_task(task_id: str = "", result: str | None = None) -> str:
     """Mark a task as completed with an optional result summary."""
+    if not task_id:
+        return json.dumps({"error": "Missing required argument: task_id"})
     tm = get_task_manager()
     task = tm.complete_task(task_id, result=result)
     if not task:
@@ -526,17 +544,19 @@ def complete_task(task_id: str, result: str | None = None) -> str:
     })
 
 
-def ask_human(question: str) -> str:
+def ask_human(question: str = "") -> str:
     """Ask the human a question when you need their input to proceed.
-    
+
     Use this when:
     - You need a decision that requires human judgment
     - You need credentials, tokens, or access that only the human can provide
     - You've tried workarounds and need guidance on how to proceed
     - The task requires approval before making a potentially destructive change
-    
+
     The task will be paused until the human responds.
     """
+    if not question:
+        question = "Human input needed"
     tm = get_task_manager()
     session_key = _task_session_key or "default"
     task = tm.get_active_task(session_key)
@@ -1247,7 +1267,10 @@ def _make_handler(func):
 
  def handler(args):
   filtered = {k: v for k, v in args.items() if k in valid_params}
-  return func(**filtered)
+  try:
+   return func(**filtered)
+  except TypeError as e:
+   return json.dumps({"error": f"Missing or invalid arguments for {func.__name__}: {e}"})
 
  return handler
 
