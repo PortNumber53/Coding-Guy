@@ -323,17 +323,45 @@ def _get_browser_page():
     global _playwright_ctx, _browser, _page
     if sync_playwright is None:
         raise RuntimeError("playwright is not installed. Add it to requirements.txt and install.")
-    if _playwright_ctx is None:
-        _playwright_ctx = sync_playwright().start()
-        _browser = _playwright_ctx.chromium.launch(headless=True)
-        _page = _browser.new_page()
+    # If any part of the browser stack is missing, re-initialize everything.
+    if _playwright_ctx is None or _browser is None or _page is None:
+        _cleanup_browser()
+        try:
+            _playwright_ctx = sync_playwright().start()
+            _browser = _playwright_ctx.chromium.launch(headless=True)
+            _page = _browser.new_page()
+        except Exception:
+            _cleanup_browser()
+            raise
     return _page
+
+
+def _cleanup_browser():
+    """Safely tear down any partially initialized browser state."""
+    global _playwright_ctx, _browser, _page
+    try:
+        if _page:
+            _page.close()
+    except Exception:
+        pass
+    try:
+        if _browser:
+            _browser.close()
+    except Exception:
+        pass
+    try:
+        if _playwright_ctx:
+            _playwright_ctx.stop()
+    except Exception:
+        pass
+    _page = _browser = _playwright_ctx = None
 
 
 def browser_navigate(url: str, wait_until: str = "load", timeout: int = 60000) -> str:
     """Navigate the browser to a URL.
     wait_until: "load", "domcontentloaded", "networkidle", "commit".
     """
+    page = None
     try:
         page = _get_browser_page()
         page.goto(url, wait_until=wait_until, timeout=timeout)
@@ -344,9 +372,9 @@ def browser_navigate(url: str, wait_until: str = "load", timeout: int = 60000) -
         })
     except Exception as e:
         return json.dumps({
-            "url": page.url if 'page' in locals() else url,
-            "title": page.title() if 'page' in locals() else "Unknown",
-            "status": "timeout",
+            "url": page.url if page is not None else url,
+            "title": page.title() if page is not None else "Unknown",
+            "status": "error",
             "error": str(e)
         })
 
@@ -437,15 +465,8 @@ def browser_get_elements(selector: str, attributes: list[str] | None = None) -> 
 
 def browser_close() -> str:
     """Close the browser and cleanup."""
-    global _playwright_ctx, _browser, _page
     try:
-        if _page:
-            _page.close()
-        if _browser:
-            _browser.close()
-        if _playwright_ctx:
-            _playwright_ctx.stop()
-        _page = _browser = _playwright_ctx = None
+        _cleanup_browser()
         return json.dumps({"status": "closed"})
     except Exception as e:
         return json.dumps({"error": str(e)})
