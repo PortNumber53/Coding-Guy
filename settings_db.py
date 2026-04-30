@@ -206,7 +206,112 @@ class SettingsDatabase:
             conn.close()
 
         return True
-    
+
+    def atomic_append_to_json_array(self, key: str, item: Any,
+                                     category: str = "general",
+                                     description: str = "") -> bool:
+        """Atomically append an item to a JSON array stored at key.
+
+        Uses BEGIN IMMEDIATE to acquire a write lock so the read-modify-write
+        is safe across multiple processes.
+
+        Args:
+            key: Setting key
+            item: Item to append (must be JSON-serializable)
+            category: Grouping category
+            description: Description of the setting
+
+        Returns:
+            True if item was added (or already present), False on error
+        """
+        conn = self._get_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,)
+            ).fetchone()
+
+            current = json.loads(row[0]) if row else []
+            if not isinstance(current, list):
+                current = []
+            if item not in current:
+                current.append(item)
+                serialized = json.dumps(current)
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute("""
+                    INSERT INTO settings (key, value, value_type, category, description, updated_at)
+                    VALUES (:key, :value, 'json', :category, :description, :updated_at)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        value_type = excluded.value_type,
+                        category = excluded.category,
+                        description = excluded.description,
+                        updated_at = excluded.updated_at
+                """, {
+                    "key": key,
+                    "value": serialized,
+                    "category": category,
+                    "description": description,
+                    "updated_at": now
+                })
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    def atomic_remove_from_json_array(self, key: str, item: Any) -> bool:
+        """Atomically remove an item from a JSON array stored at key.
+
+        Uses BEGIN IMMEDIATE to acquire a write lock so the read-modify-write
+        is safe across multiple processes.
+
+        Args:
+            key: Setting key
+            item: Item to remove
+
+        Returns:
+            True if the array was updated (or key not found), False on error
+        """
+        conn = self._get_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,)
+            ).fetchone()
+
+            if not row:
+                conn.commit()
+                return True
+
+            current = json.loads(row[0])
+            if not isinstance(current, list) or item not in current:
+                conn.commit()
+                return True
+
+            current.remove(item)
+            if current:
+                serialized = json.dumps(current)
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute("""
+                    UPDATE settings
+                    SET value = ?, value_type = 'json', updated_at = ?
+                    WHERE key = ?
+                """, (serialized, now, key))
+            else:
+                conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
     def get(self, key: str, default: Any = None) -> Optional[Any]:
         """Get a setting value.
         

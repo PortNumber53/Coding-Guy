@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -339,14 +340,47 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
     return message
 
 
+def _parse_tool_args(arguments_str: str) -> dict:
+    """Parse tool arguments with fallbacks for malformed LLM JSON."""
+    text = arguments_str.strip()
+    if not text:
+        return {}
+    try:
+        decoder = json.JSONDecoder(strict=False)
+        args, _ = decoder.raw_decode(text)
+        if isinstance(args, dict):
+            return args
+    except json.JSONDecodeError:
+        pass
+    for suffix in ("}", '"}', '""}', '"'):
+        try:
+            args, _ = decoder.raw_decode(text + suffix)
+            if isinstance(args, dict):
+                return args
+        except json.JSONDecodeError:
+            pass
+    args = {}
+    # Handles escaped quotes inside string values (e.g. "val with \"quote\"")
+    pattern = re.compile(r'"(\w+)"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(\d+(?:\.\d+)?)|true|false|null)')
+    for m in pattern.finditer(text):
+        key = m.group(1)
+        if m.group(2) is not None:
+            val = m.group(2)
+        elif m.group(3) is not None:
+            val = float(m.group(3)) if '.' in m.group(3) else int(m.group(3))
+        else:
+            snippet = text[m.start():m.end()].split(':')[1].strip().lower()
+            val = snippet == 'true'
+        args[key] = val
+    if args:
+        return args
+    raise json.JSONDecodeError("Unable to parse tool arguments", text, 0)
+
+
 def execute_tool(name, arguments_str):
     """Parse arguments and execute a tool, returning the result string."""
     try:
-        # Use raw_decode with strict=False to gracefully handle cases where the model
-        # might include trailing text or use literal control characters (like newlines)
-        # in JSON strings.
-        decoder = json.JSONDecoder(strict=False)
-        args, _ = decoder.raw_decode(arguments_str.strip())
+        args = _parse_tool_args(arguments_str)
     except json.JSONDecodeError as e:
         print(f"\n[Error] Failed to parse tool arguments for '{name}': {e}", file=sys.stderr)
         print(f"[Raw arguments] {arguments_str}", file=sys.stderr)
@@ -446,9 +480,9 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
             if fn_name == "ask_human":
                 asked_human = True
                 try:
-                    args = json.loads(fn_args)
+                    args = _parse_tool_args(fn_args)
                     human_question = args.get("question", "Human input needed")
-                except json.JSONDecodeError:
+                except Exception:
                     human_question = "Human input needed"
                 break
 
