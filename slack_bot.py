@@ -14,7 +14,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_internal_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
 
-from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, COMMIT_HASH
+from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, STATUS_BLOCKED, COMMIT_HASH
 from settings_db import get_settings_db, init_default_settings
 from memory_manager import get_memory_manager, MemorySession
 
@@ -468,6 +468,17 @@ class SlackBot:
             loop = asyncio.get_running_loop()
             progress_cb = make_progress_callback(say, channel_id, loop)
 
+            # Check if there's a blocked task waiting for human input
+            from task_manager import get_task_manager
+            tm = get_task_manager()
+            active_task = tm.get_active_task(session_key)
+            if active_task and active_task.status == "blocked" and active_task.blocker:
+                # Unblock the task with the user's response
+                tm.unblock_task(active_task.uuid, text)
+                # Inject the human response into the conversation for context
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant", "content": f"[Human response received: {text}]"})
+
             # Run the blocking agent_loop in a thread
             try:
                 reply, status = await asyncio.to_thread(
@@ -478,6 +489,7 @@ class SlackBot:
                     self.invoke_url,
                     self.model,
                     progress_callback=progress_cb,
+                    session_key=session_key,
                 )
             except Exception as e:
                 logger.error(f"Error in agent_loop for channel {channel_id}, session {session_key[:8]}: {e}", exc_info=True)
@@ -501,6 +513,8 @@ class SlackBot:
             # Append status indicator for incomplete results
             if status == STATUS_MAX_ROUNDS:
                 reply += "\n\n---\n_Reached maximum tool rounds. The task may be incomplete._"
+            elif status == STATUS_BLOCKED:
+                reply += "\n\n---\n_Task paused. Reply to this message to continue._"
 
             # Update conversation history
             history.append({"role": "user", "content": text})
