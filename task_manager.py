@@ -146,6 +146,31 @@ class TaskManager:
         self._cache[task.uuid] = task
         return task
 
+    def _resolve_task_id(self, task_id: str) -> Optional[str]:
+        """Resolve a task identifier to a full UUID.
+
+        Tries exact match first, then falls back to display_id prefix
+        (first 8 chars) to tolerate LLM UUID truncation/hallucination.
+        """
+        # Exact match
+        task = self._load_task(task_id)
+        if task is not None:
+            return task.uuid
+
+        # Fallback: match by display_id (first 8 chars)
+        for cached in list(self._cache.values()):
+            if cached.display_id == task_id[:8]:
+                return cached.uuid
+
+        # Scan persisted tasks
+        index = self.db.get(TASK_INDEX_KEY) or []
+        for uuid in index:
+            task = self._load_task(uuid)
+            if task and task.display_id == task_id[:8]:
+                return task.uuid
+
+        return None
+
     def _add_to_index(self, task_uuid: str):
         """Add a session UUID to the task index (thread-safe)."""
         with self._index_lock:
@@ -236,14 +261,16 @@ class TaskManager:
         logger.info(f"Created task {task.display_id}: {description}")
         return task
 
-    def get_task(self, task_uuid: str) -> Optional[Task]:
-        return self._load_task(task_uuid)
+    def get_task(self, task_id: str) -> Optional[Task]:
+        task_uuid = self._resolve_task_id(task_id)
+        return self._load_task(task_uuid) if task_uuid else None
 
-    def update_step(self, task_uuid: str, step_index: int,
+    def update_step(self, task_id: str, step_index: int,
                     status: str, result: Optional[str] = None,
                     error: Optional[str] = None) -> Optional[Task]:
         """Update a step's status within a task."""
-        task = self._load_task(task_uuid)
+        task_uuid = self._resolve_task_id(task_id)
+        task = self._load_task(task_uuid) if task_uuid else None
         if not task:
             return None
 
@@ -275,9 +302,10 @@ class TaskManager:
         self._save_task(task)
         return task
 
-    def advance_step(self, task_uuid: str) -> Optional[Task]:
+    def advance_step(self, task_id: str) -> Optional[Task]:
         """Move to the next pending step and mark it in_progress."""
-        task = self._load_task(task_uuid)
+        task_uuid = self._resolve_task_id(task_id)
+        task = self._load_task(task_uuid) if task_uuid else None
         if not task:
             return None
 
@@ -297,9 +325,10 @@ class TaskManager:
             self._save_task(task)
         return task
 
-    def complete_task(self, task_uuid: str, result: Optional[str] = None) -> Optional[Task]:
+    def complete_task(self, task_id: str, result: Optional[str] = None) -> Optional[Task]:
         """Mark a task as completed."""
-        task = self._load_task(task_uuid)
+        task_uuid = self._resolve_task_id(task_id)
+        task = self._load_task(task_uuid) if task_uuid else None
         if not task:
             return None
 
@@ -318,9 +347,10 @@ class TaskManager:
         self._save_task(task)
         return task
 
-    def fail_task(self, task_uuid: str, error: str) -> Optional[Task]:
+    def fail_task(self, task_id: str, error: str) -> Optional[Task]:
         """Mark a task as failed with an error message."""
-        task = self._load_task(task_uuid)
+        task_uuid = self._resolve_task_id(task_id)
+        task = self._load_task(task_uuid) if task_uuid else None
         if not task:
             return None
 
@@ -329,9 +359,10 @@ class TaskManager:
         self._save_task(task)
         return task
 
-    def block_task(self, task_uuid: str, blocker: str) -> Optional[Task]:
+    def block_task(self, task_id: str, blocker: str) -> Optional[Task]:
         """Block a task pending human intervention."""
-        task = self._load_task(task_uuid)
+        task_uuid = self._resolve_task_id(task_id)
+        task = self._load_task(task_uuid) if task_uuid else None
         if not task:
             return None
 
@@ -342,9 +373,10 @@ class TaskManager:
         logger.info(f"Task {task.display_id} blocked: {blocker}")
         return task
 
-    def unblock_task(self, task_uuid: str, human_response: str) -> Optional[Task]:
+    def unblock_task(self, task_id: str, human_response: str) -> Optional[Task]:
         """Unblock a task after human provides input."""
-        task = self._load_task(task_uuid)
+        task_uuid = self._resolve_task_id(task_id)
+        task = self._load_task(task_uuid) if task_uuid else None
         if not task:
             return None
 
@@ -355,9 +387,10 @@ class TaskManager:
         logger.info(f"Task {task.display_id} unblocked with response: {human_response[:80]}")
         return task
 
-    def delete_task(self, task_uuid: str) -> bool:
+    def delete_task(self, task_id: str) -> bool:
         """Delete a task permanently."""
-        task = self._load_task(task_uuid)
+        task_uuid = self._resolve_task_id(task_id)
+        task = self._load_task(task_uuid) if task_uuid else None
         if not task:
             return False
 
