@@ -23,6 +23,7 @@ from suno_client import (
 )
 
 from task_manager import get_task_manager
+from error_tracker import get_error_tracker
 
 # MCP support
 _mcp_client = None
@@ -584,6 +585,60 @@ def list_tasks(status: str | None = None) -> str:
             "steps_completed": sum(1 for s in t.get_step_objects() if s.status == "completed"),
         })
     return json.dumps({"tasks": result, "count": len(result)})
+
+
+# --- Error tracker tools ---
+
+def list_errors(limit: int = 20, offset: int = 0, error_type: str | None = None,
+                severity: str | None = None, resolved: bool | None = None) -> str:
+    """List tracked errors, optionally filtered by type, severity, or resolved status."""
+    tracker = get_error_tracker()
+    errors = tracker.get_errors(
+        error_type=error_type or None,
+        severity=severity or None,
+        resolved=resolved,
+        limit=limit,
+        offset=offset,
+    )
+    result = []
+    for e in errors:
+        result.append({
+            "id": e.id,
+            "error_type": e.error_type,
+            "severity": e.severity,
+            "source": f"{e.source_module}.{e.source_function}" if e.source_function else e.source_module,
+            "error_class": e.error_class,
+            "error_message": e.error_message[:100],
+            "occurrence_count": e.occurrence_count,
+            "last_seen_at": e.last_seen_at,
+            "resolved": e.resolved,
+            "task_id": e.task_id[:8] if e.task_id else "",
+        })
+    return json.dumps({"errors": result, "count": len(result)})
+
+
+def get_error_details(error_id: int) -> str:
+    """Get full details of a specific tracked error, including stack trace."""
+    tracker = get_error_tracker()
+    record = tracker.get_error(error_id)
+    if not record:
+        return json.dumps({"error": f"Error #{error_id} not found"})
+    return json.dumps(record.to_dict(), default=str)
+
+
+def resolve_error(error_id: int) -> str:
+    """Mark a tracked error as resolved."""
+    tracker = get_error_tracker()
+    success = tracker.resolve_error(error_id)
+    if success:
+        return json.dumps({"error_id": error_id, "resolved": True, "message": "Error marked as resolved"})
+    return json.dumps({"error": f"Error #{error_id} not found"})
+
+
+def get_error_summary() -> str:
+    """Get a summary of tracked errors, including counts by type and severity."""
+    tracker = get_error_tracker()
+    return json.dumps(tracker.get_error_summary(), default=str)
 
 
 # --- Tool definitions for the OpenAI-compatible tool-calling API ---

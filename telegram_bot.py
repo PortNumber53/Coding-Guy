@@ -22,6 +22,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, STATUS_BLOCKED, COMMIT_HASH
 from settings_db import get_settings_db, init_default_settings, CATEGORY_AGENT, CATEGORY_TELEGRAM
 from memory_manager import get_memory_manager, MemorySession
+from error_tracker import get_error_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,8 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/memory - Manage memory sessions\n"
         "/webhook - Show GitHub webhook configuration\n"
         "/status - Show server status\n"
-        "/settings - Show/manage settings"
+        "/settings - Show/manage settings\n"
+        "/errors - View tracked errors and self-heal status"
     )
 
 
@@ -411,6 +413,121 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
+
+async def handle_errors(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /errors command - show tracked errors and self-heal status."""
+    from error_tracker import get_error_tracker
+    args = context.args or []
+    tracker = get_error_tracker()
+
+    if not args:
+        # Show summary
+        summary = tracker.get_error_summary()
+        lines = [
+            "*Error Tracker Summary*",
+            f"Total errors: {summary['total_errors']}",
+            f"Unresolved: {summary['unresolved_errors']}",
+        ]
+        if summary.get('unresolved_by_type'):
+            lines.append("\n*By type:*")
+            for etype, count in summary['unresolved_by_type'].items():
+                lines.append(f"  {etype}: {count}")
+        if summary.get('unresolved_by_severity'):
+            lines.append("\n*By severity:*")
+            for sev, count in summary['unresolved_by_severity'].items():
+                lines.append(f"  {sev}: {count}")
+        if summary.get('top_recurring'):
+            lines.append("\n*Top recurring:*")
+            for rec in summary['top_recurring'][:5]:
+                lines.append(f"  #{rec.get('fingerprint', '?')[:8]}: {rec.get('error_class', '?')} - {rec.get('error_message', '')[:50]} (x{rec.get('occurrence_count', 0)})")
+        lines.extend([
+            "",
+            "Commands:",
+            "/errors list - List unresolved errors",
+            "/errors <id> - Get details of a specific error",
+            "/errors resolve <id> - Mark an error as resolved",
+            "/errors all - List all errors including resolved",
+        ])
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    subcommand = args[0].lower()
+
+    if subcommand == "list":
+        errors = tracker.get_unresolved_errors(limit=20)
+        if not errors:
+            await update.message.reply_text("No unresolved errors! Everything is clean.")
+            return
+        lines = [f"*Unresolved Errors ({len(errors)}):*"]
+        for e in errors[:20]:
+            src = f"{e.source_module}.{e.source_function}" if e.source_function else e.source_module
+            lines.append(f"  #{e.id} [{e.severity}] {e.error_class} in {src}: {e.error_message[:60]} (x{e.occurrence_count})")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    elif subcommand == "all":
+        errors = tracker.get_errors(limit=30)
+        if not errors:
+            await update.message.reply_text("No errors tracked yet.")
+            return
+        lines = [f"*All Errors ({len(errors)}):*"]
+        for e in errors[:30]:
+            status_mark = "✓" if e.resolved else "✗"
+            lines.append(f"  {status_mark} #{e.id} [{e.severity}] {e.error_class}: {e.error_message[:50]} (x{e.occurrence_count})")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    elif subcommand == "resolve" and len(args) >= 2:
+        try:
+            error_id = int(args[1])
+        except ValueError:
+            await update.message.reply_text("Error ID must be a number.")
+            return
+        success = tracker.resolve_error(error_id)
+        if success:
+            await update.message.reply_text(f"Error #{error_id} marked as resolved.")
+        else:
+            await update.message.reply_text(f"Error #{error_id} not found.")
+
+    else:
+        # Try to parse as error ID
+        try:
+            error_id = int(subcommand)
+            record = tracker.get_error(error_id)
+            if not record:
+                await update.message.reply_text(f"Error #{error_id} not found.")
+                return
+            lines = [
+                f"*Error #{record.id}*",
+                f"Type: {record.error_type}",
+                f"Severity: {record.severity}",
+                f"Class: `{record.error_class}`",
+                f"Source: {record.source_module}.{record.source_function}" if record.source_function else f"Source: {record.source_module}",
+                f"Message: {record.error_message[:500]}",
+                f"Occurrences: {record.occurrence_count}",
+                f"First seen: {record.first_seen_at}",
+                f"Last seen: {record.last_seen_at}",
+                f"Resolved: {'Yes' if record.resolved else 'No'}",
+            ]
+            if record.task_id:
+                lines.append(f"Heal task: `{record.task_id[:8]}`")
+            if record.stack_trace:
+                trace_preview = record.stack_trace[:1000]
+                lines.append(f"\n*Stack trace:*\n```\n{trace_preview}\n```")
+            if record.request_url:
+                lines.append(f"\n*Request:* {record.request_method} {record.request_url}")
+                if record.response_status_code:
+                    lines.append(f"Response status: {record.response_status_code}")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        except ValueError:
+            await update.message.reply_text(
+                "Unknown subcommand. Usage:\n"
+                "/errors - Summary\n"
+                "/errors list - Unresolved errors\n"
+                "/errors all - All errors\n"
+                "/errors <id> - Error details\n"
+                "/errors resolve <id> - Mark resolved"
+            )
+
+
 def make_progress_callback(chat, loop):
     """Return a callback that sends progress updates to a Telegram chat.
 
@@ -500,6 +617,19 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         except Exception as e:
             logger.error(f"Error in agent_loop for chat {chat_id}, session {session_key[:8]}: {e}", exc_info=True)
+            # Track the unhandled exception from agent_loop
+            try:
+                tracker = get_error_tracker()
+                tracker.record_exception(
+                    e,
+                    source_module="telegram_bot",
+                    source_function="_handle_message_impl",
+                    context={"chat_id": str(chat_id), "session_key": session_key},
+                    session_key=session_key,
+                    severity="critical",
+                )
+            except Exception:
+                pass  # Don't let error tracking break the handler
             reply = None
             status = STATUS_ERROR
 
@@ -685,6 +815,7 @@ def run_telegram_bot(api_key: str, invoke_url: str, model: str) -> None:
     tg_app.add_handler(CommandHandler("webhook", handle_webhook))
     tg_app.add_handler(CommandHandler("status", handle_status))
     tg_app.add_handler(CommandHandler("settings", handle_settings))
+    tg_app.add_handler(CommandHandler("errors", handle_errors))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Derive the Telegram webhook path from the URL

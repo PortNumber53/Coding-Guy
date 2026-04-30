@@ -17,6 +17,7 @@ from slack_sdk.errors import SlackApiError
 from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, STATUS_BLOCKED, COMMIT_HASH
 from settings_db import get_settings_db, init_default_settings
 from memory_manager import get_memory_manager, MemorySession
+from error_tracker import get_error_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -489,6 +490,19 @@ class SlackBot:
                 )
             except Exception as e:
                 logger.error(f"Error in agent_loop for channel {channel_id}, session {session_key[:8]}: {e}", exc_info=True)
+            # Track the unhandled exception from agent_loop
+            try:
+                tracker = get_error_tracker()
+                tracker.record_exception(
+                    e,
+                    source_module="slack_bot",
+                    source_function="_process_message",
+                    context={"channel_id": channel_id, "session_key": session_key},
+                    session_key=session_key,
+                    severity="critical",
+                )
+            except Exception:
+                pass  # Don't let error tracking break the handler
                 await say(
                     text="Sorry, an error occurred while processing your request.",
                     thread_ts=None

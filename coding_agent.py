@@ -37,6 +37,13 @@ from api_key_pool import (
     get_global_pool,
     parse_api_keys_from_env,
 )
+from error_tracker import (
+    get_error_tracker,
+    ErrorTracker,
+    SEVERITY_HIGH,
+    SEVERITY_CRITICAL,
+    SEVERITY_MEDIUM,
+)
 
 load_dotenv()
 
@@ -102,6 +109,12 @@ Suno Music Tools (when SUNO_API_KEY is configured):
 - suno_get_song_data: Get song metadata and download URLs
 - suno_list_songs: Browse generated songs
 - suno_delete_song: Remove a generated song
+
+Error Tracking Tools (for self-healing and debugging):
+- list_errors: List tracked errors from the error database.
+- get_error_details: Get full details of a specific error (stack trace, context).
+- resolve_error: Mark an error as resolved after fixing it.
+- get_error_summary: Get error statistics and top recurring errors.
 
 When given a task:
 1. Use create_task to plan your work with concrete steps.
@@ -214,7 +227,8 @@ def build_messages(conversation_history, user_input, docker_manager=None, sessio
     return messages
 
 
-def call_llm_api(messages, api_key, invoke_url, model, stream=True):
+def call_llm_api(messages, api_key, invoke_url, model, stream=True,
+                session_key=None, conversation_round=-1):
     """Call the Nvidia API. Returns the full response JSON (non-streamed) or
     the assembled message dict (streamed) including any tool_calls."""
     # Get pool key for tracking
@@ -228,6 +242,13 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
         waited = limiter.wait_if_needed()
         if waited > 0:
             print(f"[Rate limit] Waiting {waited:.2f}s before next request", file=sys.stderr)
+
+    # Build a summary of the request for error tracking (don't log full messages)
+    payload_summary = json.dumps({
+        "model": model, "stream": stream,
+        "num_messages": len(messages),
+        "num_tools": len(TOOL_DEFINITIONS),
+    })[:500]
 
     headers = {
         "Authorization": f"Bearer {actual_key}",
@@ -257,10 +278,38 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True):
         if limiter:
             limiter.record_success()
 
+        # Track successful agent call
+        tracker = get_error_tracker()
+        tracker.track_agent_call(
+            url=invoke_url, method="POST", model=model,
+            request_payload_summary=payload_summary,
+            response_status_code=response.status_code,
+            session_key=session_key or "",
+            conversation_round=conversation_round,
+        )
+
     except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
         # Record failure for pool key
         is_http_error = isinstance(e, requests.exceptions.HTTPError)
         status_code = e.response.status_code if is_http_error and e.response is not None else 0
+
+        # Track the API failure in the error database
+        tracker = get_error_tracker()
+        resp_body = ""
+        try:
+            resp_body = e.response.text[:2000] if is_http_error and e.response is not None else ""
+        except Exception:
+            pass
+        tracker.record_api_failure(
+            url=invoke_url, method="POST", status_code=status_code,
+            error_message=str(e),
+            request_payload_summary=payload_summary,
+            response_body_summary=resp_body,
+            source_module="coding_agent", source_function="call_llm_api",
+            session_key=session_key or "",
+            conversation_round=conversation_round,
+            severity=SEVERITY_CRITICAL if status_code >= 500 or status_code == 429 else SEVERITY_HIGH,
+        )
 
         if pool_key:
             if status_code == 429:
@@ -391,7 +440,22 @@ def execute_tool(name, arguments_str):
         return json.dumps({"error": f"Unknown tool: {name}"})
 
     print(f" -> {name}({', '.join(f'{k}={repr(v)[:60]}' for k, v in args.items())})", file=sys.stderr)
-    return handler(args)
+    try:
+        result = handler(args)
+    except Exception as exc:
+        # Track tool execution failure
+        tracker = get_error_tracker()
+        tracker.record_exception(
+            exc,
+            source_module="tools",
+            source_function=name,
+            context={"tool_name": name, "tool_args": arguments_str[:500]},
+            session_key=getattr(execute_tool, '_session_key', ''),
+            conversation_round=getattr(execute_tool, '_conversation_round', -1),
+            severity=SEVERITY_MEDIUM,
+        )
+        result = json.dumps({"error": f"Tool '{name}' raised {type(exc).__name__}: {str(exc)}"})
+    return result
 
 
 def agent_loop(user_input, conversation_history, api_key, invoke_url, model, docker_manager=None,
@@ -416,7 +480,8 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
         max_retries = 5
         for attempt in range(max_retries + 1):
             try:
-                assistant_msg = call_llm_api(messages, api_key, invoke_url, model, stream=True)
+                assistant_msg = call_llm_api(messages, api_key, invoke_url, model, stream=True,
+                                             session_key=session_key, conversation_round=round_num)
                 break
             except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
                 is_http_error = isinstance(e, requests.exceptions.HTTPError)
@@ -446,9 +511,19 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
                         print(f"\nAPI error: {e}", file=sys.stderr)
                     return None, STATUS_ERROR
                 # else: is_retryable and it's the last attempt. Loop will finish.
-        else:
-            print(f"\nAPI error: max retries exceeded", file=sys.stderr)
-            return None, STATUS_ERROR
+                else:
+                    print(f"\nAPI error: max retries exceeded", file=sys.stderr)
+                    # Track the max-retries-exceeded failure
+                    tracker = get_error_tracker()
+                    tracker.record_api_failure(
+                        url=invoke_url, method="POST",
+                        error_message=f"Max retries ({max_retries}) exceeded for API call",
+                        source_module="coding_agent", source_function="agent_loop",
+                        session_key=session_key or "",
+                        conversation_round=round_num,
+                        severity=SEVERITY_CRITICAL,
+                    )
+                    return None, STATUS_ERROR
 
         messages.append(assistant_msg)
 
@@ -461,6 +536,10 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
         print("\n[Tool calls]", file=sys.stderr)
         asked_human = False
         human_question = None
+        # Make session_key and round_num available to execute_tool for error tracking
+        execute_tool._session_key = session_key or ""
+        execute_tool._conversation_round = round_num
+
         for tc in tool_calls:
             fn_name = tc["function"]["name"]
             fn_args = tc["function"]["arguments"]

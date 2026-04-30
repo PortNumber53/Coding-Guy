@@ -16,6 +16,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Error tracking integration
+try:
+    from error_tracker import get_error_tracker, SEVERITY_HIGH, SEVERITY_CRITICAL
+    _error_tracking = True
+except ImportError:
+    _error_tracking = False
+
 # OpenRouter API configuration
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_POLLING_URL = "https://openrouter.ai/api/v1/generation"
@@ -157,12 +164,50 @@ class OpenRouterClient:
                 return response.json()["choices"][0]["message"]
                 
         except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else 0
+            resp_body = ""
+            try:
+                resp_body = e.response.text[:2000] if e.response is not None else ""
+            except Exception:
+                pass
+            # Track the API failure
+            if _error_tracking:
+                try:
+                    tracker = get_error_tracker()
+                    tracker.record_api_failure(
+                        url=OPENROUTER_API_URL, method="POST",
+                        status_code=status_code,
+                        error_message=str(e),
+                        request_payload_summary=f"model={self.config.model}, stream={stream}",
+                        response_body_summary=resp_body,
+                        source_module="openrouter_client",
+                        source_function="chat_completion",
+                        severity=SEVERITY_CRITICAL if status_code >= 500 else SEVERITY_HIGH,
+                    )
+                except Exception:
+                    pass  # Don't let error tracking break the client
             if e.response.status_code == 401:
                 raise ValueError("Invalid OpenRouter API key. Check your OPENROUTER_API_KEY.")
             elif e.response.status_code == 402:
                 raise ValueError("Insufficient credits on OpenRouter account.")
             elif e.response.status_code == 429:
                 raise RuntimeError("Rate limit exceeded. Please wait before retrying.")
+            raise
+        except requests.exceptions.RequestException as e:
+            # Track connection/timeout errors
+            if _error_tracking:
+                try:
+                    tracker = get_error_tracker()
+                    tracker.record_api_failure(
+                        url=OPENROUTER_API_URL, method="POST",
+                        error_message=str(e),
+                        request_payload_summary=f"model={self.config.model}, stream={stream}",
+                        source_module="openrouter_client",
+                        source_function="chat_completion",
+                        severity=SEVERITY_HIGH,
+                    )
+                except Exception:
+                    pass
             raise
     
     def _process_stream(self, response) -> Dict[str, Any]:

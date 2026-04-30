@@ -616,6 +616,7 @@ CATEGORY_SLACK = "slack"
 CATEGORY_DOCKER = "docker"
 CATEGORY_API = "api"
 CATEGORY_UI = "ui"
+CATEGORY_ERROR = "error"
 
 # Predefined settings with defaults
 DEFAULT_SETTINGS = {
@@ -644,6 +645,11 @@ DEFAULT_SETTINGS = {
     # UI settings
     ("ui.show_tool_calls", True, "boolean", CATEGORY_UI, "Show tool calls in output"),
     ("ui.show_progress", True, "boolean", CATEGORY_UI, "Show progress indicators"),
+
+ # Error tracker settings
+ ("error_tracker.auto_heal_enabled", True, "boolean", CATEGORY_ERROR, "Enable auto-generation of fix/heal tasks from recurring errors"),
+ ("error_tracker.auto_heal_threshold", 3, "integer", CATEGORY_ERROR, "Number of error occurrences before auto-generating a heal task"),
+ ("error_tracker.auto_heal_cooldown", 3600, "integer", CATEGORY_ERROR, "Seconds between auto-heal tasks for the same error fingerprint"),
 }
 
 
