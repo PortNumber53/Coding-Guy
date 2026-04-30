@@ -22,6 +22,8 @@ from suno_client import (
  suno_delete_song,
 )
 
+from task_manager import get_task_manager
+
 # MCP support
 _mcp_client = None
 _mcp_tools_loaded = False
@@ -447,6 +449,100 @@ def browser_close() -> str:
         return json.dumps({"status": "closed"})
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+# --- Task management tools ---
+
+# Session key for task tracking (set by coding_agent.py per conversation)
+_task_session_key: str | None = None
+
+
+def set_task_session_key(key: str):
+    """Set the session key used to associate tasks with a conversation."""
+    global _task_session_key
+    _task_session_key = key
+
+
+def create_task(description: str, steps: list[str] | None = None) -> str:
+    """Create a tracked task with optional ordered steps."""
+    tm = get_task_manager()
+    session_key = _task_session_key or "default"
+    task = tm.create_task(description, steps=steps, session_key=session_key)
+    return json.dumps({
+        "task_id": task.uuid,
+        "display_id": task.display_id,
+        "description": task.description,
+        "status": task.status,
+        "steps": len(task.steps),
+    })
+
+
+def update_task_step(task_id: str, step_index: int, status: str,
+                     result: str | None = None, error: str | None = None) -> str:
+    """Update a task step's status. Status: in_progress, completed, failed, skipped."""
+    tm = get_task_manager()
+    task = tm.update_step(task_id, step_index, status, result=result, error=error)
+    if not task:
+        return json.dumps({"error": f"Task or step not found: {task_id} step {step_index}"})
+    return json.dumps({
+        "task_id": task.uuid,
+        "status": task.status,
+        "step_index": step_index,
+        "step_status": status,
+    })
+
+
+def complete_task(task_id: str, result: str | None = None) -> str:
+    """Mark a task as completed with an optional result summary."""
+    tm = get_task_manager()
+    task = tm.complete_task(task_id, result=result)
+    if not task:
+        return json.dumps({"error": f"Task not found: {task_id}"})
+    return json.dumps({
+        "task_id": task.uuid,
+        "status": "completed",
+        "result": result,
+    })
+
+
+def ask_human(question: str) -> str:
+    """Ask the human a question when you need their input to proceed.
+    
+    Use this when:
+    - You need a decision that requires human judgment
+    - You need credentials, tokens, or access that only the human can provide
+    - You've tried workarounds and need guidance on how to proceed
+    - The task requires approval before making a potentially destructive change
+    
+    The task will be paused until the human responds.
+    """
+    tm = get_task_manager()
+    session_key = _task_session_key or "default"
+    task = tm.get_active_task(session_key)
+    if task:
+        tm.block_task(task.uuid, question)
+    return json.dumps({
+        "status": "blocked",
+        "question": question,
+        "message": "Task is paused. Waiting for human response.",
+    })
+
+
+def list_tasks(status: str | None = None) -> str:
+    """List tracked tasks, optionally filtered by status."""
+    tm = get_task_manager()
+    tasks = tm.list_tasks(status=status)
+    result = []
+    for t in tasks:
+        result.append({
+            "task_id": t.uuid,
+            "display_id": t.display_id,
+            "description": t.description,
+            "status": t.status,
+            "steps_total": len(t.steps),
+            "steps_completed": sum(1 for s in t.get_step_objects() if s.status == "completed"),
+        })
+    return json.dumps({"tasks": result, "count": len(result)})
 
 
 # --- Tool definitions for the OpenAI-compatible tool-calling API ---
@@ -993,6 +1089,134 @@ _BASE_TOOL_DEFINITIONS = [
    }
   }
  },
+ {
+  "type": "function",
+  "function": {
+   "name": "create_task",
+   "description": (
+    "Create a tracked task with ordered steps. Use this at the start of any "
+    "non-trivial task to plan your work. Each step should be a concrete action. "
+    "Update steps as you progress. This helps you resume if errors occur."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "description": {
+      "type": "string",
+      "description": "A clear description of the overall task."
+     },
+     "steps": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Ordered list of step descriptions. Break the task into concrete, verifiable actions."
+     }
+    },
+    "required": ["description"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "update_task_step",
+   "description": (
+    "Update the status of a task step. Mark steps in_progress when you start them, "
+    "completed when done, failed if an error occurs, or skipped if no longer needed."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "task_id": {
+      "type": "string",
+      "description": "The task ID returned by create_task."
+     },
+     "step_index": {
+      "type": "integer",
+      "description": "0-based index of the step to update."
+     },
+     "status": {
+      "type": "string",
+      "enum": ["in_progress", "completed", "failed", "skipped"],
+      "description": "New status for the step."
+     },
+     "result": {
+      "type": "string",
+      "description": "Optional result summary when completing a step."
+     },
+     "error": {
+      "type": "string",
+      "description": "Error description when marking a step as failed."
+     }
+    },
+    "required": ["task_id", "step_index", "status"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "complete_task",
+   "description": (
+    "Mark a task as completed. Call this when all work is done and verified. "
+    "Include a brief result summary."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "task_id": {
+      "type": "string",
+      "description": "The task ID to complete."
+     },
+     "result": {
+      "type": "string",
+      "description": "Optional summary of what was accomplished."
+     }
+    },
+    "required": ["task_id"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "ask_human",
+   "description": (
+    "Ask the human a question and pause the task until they respond. "
+    "Use this when you need: a decision requiring human judgment, "
+    "credentials or access only the human can provide, guidance after "
+    "failed workarounds, or approval before destructive changes. "
+    "The task will be blocked until the human responds."
+   ),
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "question": {
+      "type": "string",
+      "description": "The question to ask the human. Be specific about what you need."
+     }
+    },
+    "required": ["question"]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_tasks",
+   "description": "List tracked tasks, optionally filtered by status (pending, in_progress, completed, failed, blocked).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "status": {
+      "type": "string",
+      "description": "Optional status filter.",
+      "enum": ["pending", "in_progress", "completed", "failed", "blocked"]
+     }
+    },
+    "required": []
+   }
+  }
+ },
 ]
 
 
@@ -1032,6 +1256,11 @@ _BASE_TOOL_HANDLERS = {
  "suno_get_song_data": _make_handler(suno_get_song_data),
  "suno_list_songs": _make_handler(suno_list_songs),
  "suno_delete_song": _make_handler(suno_delete_song),
+ "create_task": _make_handler(create_task),
+ "update_task_step": _make_handler(update_task_step),
+ "complete_task": _make_handler(complete_task),
+ "ask_human": _make_handler(ask_human),
+ "list_tasks": _make_handler(list_tasks),
 }
 
 

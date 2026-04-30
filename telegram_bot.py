@@ -19,7 +19,7 @@ import tornado.web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, COMMIT_HASH
+from coding_agent import agent_loop, STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, STATUS_BLOCKED, COMMIT_HASH
 from settings_db import get_settings_db, init_default_settings, CATEGORY_AGENT, CATEGORY_TELEGRAM
 from memory_manager import get_memory_manager, MemorySession
 
@@ -485,11 +485,18 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         loop = asyncio.get_running_loop()
         progress_cb = make_progress_callback(update.effective_chat, loop)
 
+        # Unblock any blocked task with the user's response
+        from task_manager import get_task_manager
+        tm = get_task_manager()
+        active_task = tm.get_active_task(session_key)
+        if active_task and active_task.status == "blocked" and active_task.blocker:
+            tm.unblock_task(active_task.uuid, user_text)
+
         # Run the blocking agent_loop in a thread
         try:
             reply, status = await asyncio.to_thread(
                 agent_loop, user_text, history, api_key, invoke_url, model,
-                progress_callback=progress_cb,
+                progress_callback=progress_cb, session_key=session_key,
             )
         except Exception as e:
             logger.error(f"Error in agent_loop for chat {chat_id}, session {session_key[:8]}: {e}", exc_info=True)
@@ -507,6 +514,8 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         # Append status indicator for incomplete results
         if status == STATUS_MAX_ROUNDS:
             reply += "\n\n-- Reached maximum tool rounds. The task may be incomplete."
+        elif status == STATUS_BLOCKED:
+            reply += "\n\n-- Task paused. Reply to this message to continue."
 
         # Update conversation history
         history.append({"role": "user", "content": user_text})

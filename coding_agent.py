@@ -17,7 +17,7 @@ from openrouter_client import (
 )
 
 from docker_manager import DockerManager
-from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, set_docker_manager, set_mcp_client
+from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, set_docker_manager, set_mcp_client, set_task_session_key
 from mcp_client import (
     MCPClient,
  init_mcp,
@@ -40,7 +40,7 @@ from api_key_pool import (
 load_dotenv()
 
 INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-MODEL = "moonshotai/kimi-k2-thinking"
+MODEL = "z-ai/glm-5.1"
 
 # OpenRouter configuration
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -60,6 +60,7 @@ DEFAULT_WORKSPACE = os.environ.get(
 STATUS_COMPLETE = "complete"
 STATUS_MAX_ROUNDS = "max_rounds"
 STATUS_ERROR = "error"
+STATUS_BLOCKED = "blocked"
 
 
 def _get_commit_hash() -> str:
@@ -87,6 +88,13 @@ execute_command, multi_read_file, multi_write_file, read_dockerfile, \
 write_dockerfile, rebuild_container, web, ask_ollama, \
 browser_navigate, browser_action, browser_get_content, browser_close.
 
+Task Tracking Tools:
+- create_task: Plan your work by creating a task with ordered steps before starting.
+- update_task_step: Mark steps in_progress, completed, failed, or skipped as you work.
+- complete_task: Mark the overall task as done when finished.
+- ask_human: Pause and ask the human a question when you need their input.
+- list_tasks: View current tasks and their status.
+
 Suno Music Tools (when SUNO_API_KEY is configured):
 - suno_generate_song: Generate AI music with custom lyrics and style
 - suno_get_job_status: Check generation progress
@@ -95,12 +103,25 @@ Suno Music Tools (when SUNO_API_KEY is configured):
 - suno_delete_song: Remove a generated song
 
 When given a task:
-1. Use ls_file and grep_file to explore the codebase.
-2. Read relevant files to understand the current state.
-3. Plan your changes.
-4. Use patch_file for targeted edits or write_file for new files.
-5. Use execute_command to run builds, tests, or scripts (e.g. "go run main.go", "python3 app.py", "npm test").
-6. Verify your work by reading the result.
+1. Use create_task to plan your work with concrete steps.
+2. Use ls_file and grep_file to explore the codebase.
+3. Read relevant files to understand the current state.
+4. Update task steps as you progress (mark in_progress → completed/failed).
+5. Use patch_file for targeted edits or write_file for new files.
+6. Use execute_command to run builds, tests, or scripts (e.g. "go run main.go", "python3 app.py", "npm test").
+7. Verify your work by reading the result.
+8. Call complete_task when done.
+
+If you encounter errors:
+- Mark the step as failed with the error details.
+- Try to work around the issue: look for alternative approaches, search for solutions, or try a different method.
+- If you've exhausted your workarounds, use ask_human to request guidance.
+- When resuming after an error, pick up from the failed step and try a different approach.
+
+When you need human input:
+- Use ask_human with a specific question about what you need.
+- The task will pause until the human responds.
+- After receiving a response, continue from where you left off.
 
 For web browsing and data collection:
 1. Use browser_navigate to go to a website.
@@ -158,7 +179,7 @@ def get_pool_key():
     return None
 
 
-def build_messages(conversation_history, user_input, docker_manager=None):
+def build_messages(conversation_history, user_input, docker_manager=None, session_key=None):
     system = SYSTEM_PROMPT
     if docker_manager and docker_manager.startup_warnings:
         warnings = "\n".join(docker_manager.startup_warnings)
@@ -177,6 +198,15 @@ def build_messages(conversation_history, user_input, docker_manager=None):
             system += "\n\nSSH mode: keys. SSH keys are mounted from the host — SSH cloning works natively."
         else:
             system += "\n\nSSH mode: none. SSH URLs are automatically converted to HTTPS with token auth."
+
+    # Inject task resume context if there's an active/blocked/failed task
+    if session_key:
+        from task_manager import get_task_manager
+        tm = get_task_manager()
+        resume_ctx = tm.get_resume_context(session_key)
+        if resume_ctx:
+            system += "\n\n" + resume_ctx
+
     messages = [{"role": "system", "content": system}]
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_input})
@@ -331,13 +361,17 @@ def execute_tool(name, arguments_str):
 
 
 def agent_loop(user_input, conversation_history, api_key, invoke_url, model, docker_manager=None,
-               max_rounds=None, progress_callback=None):
+               max_rounds=None, progress_callback=None, session_key=None):
     """Run the agent loop: call the model, execute tools, repeat until done.
 
     Returns (reply_text, status) where status is one of
-    STATUS_COMPLETE, STATUS_MAX_ROUNDS, or STATUS_ERROR.
+    STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, or STATUS_BLOCKED.
     """
-    messages = build_messages(conversation_history, user_input, docker_manager)
+    # Set task session key so task tools know which conversation they belong to
+    if session_key:
+        set_task_session_key(session_key)
+
+    messages = build_messages(conversation_history, user_input, docker_manager, session_key=session_key)
     effective_max = MAX_TOOL_ROUNDS if max_rounds is None else max_rounds
     assistant_msg = {}
     limiter = get_global_limiter()
@@ -361,8 +395,8 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
 
                 if is_retryable and attempt < max_retries:
                     wait = 10 * (attempt + 1)
-                    error_type = status_code if is_http_error else "Connection"
-                    print(f"\nAPI error ({error_type}), retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                    error_type = status_code if is_http_error else type(e).__name__
+                    print(f"\nAPI error ({error_type}): {e}, retrying in {wait}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
 
                     # Record rate limit hit for adaptive rate limiting
                     if status_code == 429 and limiter:
@@ -391,6 +425,8 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
 
         # Execute each tool call and add results
         print("\n[Tool calls]", file=sys.stderr)
+        asked_human = False
+        human_question = None
         for tc in tool_calls:
             fn_name = tc["function"]["name"]
             fn_args = tc["function"]["arguments"]
@@ -405,6 +441,21 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
                 "tool_call_id": tc["id"],
                 "content": result,
             })
+
+            # Detect ask_human — pause the loop and return blocked status
+            if fn_name == "ask_human":
+                asked_human = True
+                try:
+                    args = json.loads(fn_args)
+                    human_question = args.get("question", "Human input needed")
+                except json.JSONDecodeError:
+                    human_question = "Human input needed"
+                break
+
+        # If ask_human was called, stop the loop and return blocked
+        if asked_human:
+            print(f"\n[Blocked] Waiting for human: {human_question}", file=sys.stderr)
+            return assistant_msg.get("content", "") or f"I need your input: {human_question}", STATUS_BLOCKED
 
         # Report progress after tool execution
         if progress_callback:
@@ -608,10 +659,20 @@ def main():
                 print("Conversation cleared.\n", file=sys.stderr)
                 continue
 
-            reply, status = agent_loop(user_input, conversation_history, api_key, invoke_url, model_name, docker)
+            # Unblock any blocked task with the user's response
+            from task_manager import get_task_manager
+            tm = get_task_manager()
+            active_task = tm.get_active_task("cli")
+            if active_task and active_task.status == "blocked" and active_task.blocker:
+                tm.unblock_task(active_task.uuid, user_input)
+
+            reply, status = agent_loop(user_input, conversation_history, api_key, invoke_url, model_name, docker,
+                                       session_key="cli")
 
             if status == STATUS_MAX_ROUNDS:
                 print("[Note: reached maximum tool rounds, response may be incomplete]", file=sys.stderr)
+            elif status == STATUS_BLOCKED:
+                print("[Task paused — reply to continue]", file=sys.stderr)
 
             if reply is not None:
                 conversation_history.append({"role": "user", "content": user_input})
