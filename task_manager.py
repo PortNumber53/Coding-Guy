@@ -10,6 +10,7 @@ Provides structured task tracking with:
 
 import json
 import logging
+import threading
 import uuid
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
@@ -108,6 +109,7 @@ class TaskManager:
     def __init__(self):
         self.db = get_settings_db()
         self._cache: Dict[str, Task] = {}
+        self._index_lock = threading.Lock()
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -145,18 +147,37 @@ class TaskManager:
         return task
 
     def _add_to_index(self, task_uuid: str):
-        index = self.db.get(TASK_INDEX_KEY) or []
-        if task_uuid not in index:
-            index.append(task_uuid)
-            self.db.set(TASK_INDEX_KEY, index, value_type="json",
-                        category=CATEGORY_TASK, description="Active task index")
+        """Add a session UUID to the task index (thread-safe)."""
+        with self._index_lock:
+            index_key = TASK_INDEX_KEY
+            index = self.db.get(index_key) or []
+            if task_uuid not in index:
+                index.append(task_uuid)
+                self.db.set(
+                    index_key,
+                    index,
+                    value_type="json",
+                    category=CATEGORY_TASK,
+                    description="Active task index"
+                )
 
     def _remove_from_index(self, task_uuid: str):
-        index = self.db.get(TASK_INDEX_KEY) or []
-        if task_uuid in index:
-            index.remove(task_uuid)
-            self.db.set(TASK_INDEX_KEY, index, value_type="json",
-                        category=CATEGORY_TASK, description="Active task index")
+        """Remove a session UUID from the task index (thread-safe)."""
+        with self._index_lock:
+            index_key = TASK_INDEX_KEY
+            index = self.db.get(index_key) or []
+            if task_uuid in index:
+                index.remove(task_uuid)
+                if index:
+                    self.db.set(
+                        index_key,
+                        index,
+                        value_type="json",
+                        category=CATEGORY_TASK,
+                        description="Active task index"
+                    )
+                else:
+                    self.db.delete(index_key)
 
     # -- Active task per session --
 
