@@ -32,7 +32,7 @@ OPENROUTER_MODELS = {
     "llama-3.1-70b": "meta-llama/llama-3.1-70b-instruct",
     "llama-3.1-405b": "meta-llama/llama-3.1-405b-instruct",
     "grok-beta": "x-ai/grok-beta",
-    "kimi-k2.5": "moonshotai/kimi-k2.5",
+    "kimi-k2.5": "moonshotai/kimi-k2-thinking",
 }
 
 

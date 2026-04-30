@@ -40,7 +40,7 @@ from api_key_pool import (
 load_dotenv()
 
 INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-MODEL = "moonshotai/kimi-k2.5"
+MODEL = "moonshotai/kimi-k2-thinking"
 
 # OpenRouter configuration
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -371,7 +371,11 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
 
                     time.sleep(wait)
                 elif not is_retryable:
-                    print(f"\nAPI error: {e}", file=sys.stderr)
+                    if status_code == 410:
+                        print(f"\nAPI error: Model '{model}' has reached end-of-life (410 Gone).", file=sys.stderr)
+                        print(f"Update the model name or use --openrouter / --model to switch.", file=sys.stderr)
+                    else:
+                        print(f"\nAPI error: {e}", file=sys.stderr)
                     return None, STATUS_ERROR
                 # else: is_retryable and it's the last attempt. Loop will finish.
         else:

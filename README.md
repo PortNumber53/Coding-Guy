@@ -34,7 +34,7 @@ cp .env.example .env
 ### Nvidia API Key
 
 Get your free key here:
-https://build.nvidia.com/moonshotai/kimi-k2.5
+https://build.nvidia.com/moonshotai/kimi-k2-thinking
 
 ## API Key Pool
 
