@@ -370,18 +370,18 @@ class TaskManager:
             lines.append(f"\nThe task previously failed with error: {task.error}")
             lines.append("Try a different approach to work around this error.")
 
+        if task.human_response:
+            lines.append(f"\nHuman provided response: {task.human_response}")
+            lines.append("Use this information to continue the task.")
+
         if task.status == "blocked" and task.blocker:
-            if task.human_response:
-                lines.append(f"\nHuman provided response: {task.human_response}")
-                lines.append("Use this information to continue the task.")
-            else:
-                lines.append(f"\nBLOCKED — waiting for human input on: {task.blocker}")
+            lines.append(f"\nBLOCKED — waiting for human input on: {task.blocker}")
 
         # Find the next step to work on
         steps = task.get_step_objects()
         next_pending = None
         for i, step in enumerate(steps):
-            if step.status in ("pending", "failed"):
+            if step.status in ("pending", "failed", "in_progress"):
                 next_pending = (i, step)
                 break
 

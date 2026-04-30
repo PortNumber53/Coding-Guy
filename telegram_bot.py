@@ -485,16 +485,12 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         loop = asyncio.get_running_loop()
         progress_cb = make_progress_callback(update.effective_chat, loop)
 
-        # Check if there's a blocked task waiting for human input
+        # Unblock any blocked task with the user's response
         from task_manager import get_task_manager
         tm = get_task_manager()
         active_task = tm.get_active_task(session_key)
         if active_task and active_task.status == "blocked" and active_task.blocker:
-            # Unblock the task with the user's response
             tm.unblock_task(active_task.uuid, user_text)
-            # Inject the human response into the conversation for context
-            history.append({"role": "user", "content": user_text})
-            history.append({"role": "assistant", "content": f"[Human response received: {user_text}]"})
 
         # Run the blocking agent_loop in a thread
         try:

@@ -450,6 +450,7 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
                     human_question = args.get("question", "Human input needed")
                 except json.JSONDecodeError:
                     human_question = "Human input needed"
+                break
 
         # If ask_human was called, stop the loop and return blocked
         if asked_human:
@@ -658,14 +659,12 @@ def main():
                 print("Conversation cleared.\n", file=sys.stderr)
                 continue
 
-            # Check if there's a blocked task and unblock it with user input
+            # Unblock any blocked task with the user's response
             from task_manager import get_task_manager
             tm = get_task_manager()
             active_task = tm.get_active_task("cli")
             if active_task and active_task.status == "blocked" and active_task.blocker:
                 tm.unblock_task(active_task.uuid, user_input)
-                conversation_history.append({"role": "user", "content": user_input})
-                conversation_history.append({"role": "assistant", "content": f"[Human response received: {user_input}]"})
 
             reply, status = agent_loop(user_input, conversation_history, api_key, invoke_url, model_name, docker,
                                        session_key="cli")
