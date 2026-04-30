@@ -4,6 +4,7 @@ import atexit
 import os
 import subprocess
 import sys
+import time
 import uuid
 
 # Dockerfile search paths, in priority order
@@ -36,6 +37,37 @@ MOUNT_TARGET = "/workspace"
 _ENV_FORWARD = ["GIT_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL"]
 
 
+def _detect_docker_host() -> str | None:
+    """Detect the Docker host socket from the active Docker context.
+
+    Docker Desktop on macOS uses a non-default socket path (e.g.
+    unix:///Users/<user>/.docker/run/docker.sock).  If DOCKER_HOST is
+    not already set, we read the active context so subprocess calls
+    reach the correct daemon.
+    """
+    if os.getenv("DOCKER_HOST"):
+        return None  # already explicitly configured
+
+    try:
+        result = subprocess.run(
+            ["docker", "context", "inspect", "--format", "{{ .Endpoints.docker.Host }}", "desktop-linux"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            host = result.stdout.strip()
+            if host and host.startswith("unix://"):
+                return host
+    except Exception:
+        pass
+
+    # Fallback: check if the Docker Desktop socket exists
+    desktop_sock = os.path.expanduser("~/.docker/run/docker.sock")
+    if os.path.exists(desktop_sock):
+        return f"unix://{desktop_sock}"
+
+    return None
+
+
 class DockerManager:
     """Manages a persistent Docker container for sandboxed tool execution."""
 
@@ -46,6 +78,12 @@ class DockerManager:
         self.subprocess_timeout = subprocess_timeout
         self.startup_warnings: list[str] = []
         self.ssh_mode: str = "none"  # "none", "agent", or "keys"
+
+        # Ensure subprocess calls use the correct Docker daemon socket
+        detected = _detect_docker_host()
+        if detected:
+            os.environ["DOCKER_HOST"] = detected
+
         atexit.register(self.cleanup)
 
     def _run(self, cmd: list[str], timeout: int | None = None, **kwargs) -> subprocess.CompletedProcess:
@@ -252,6 +290,24 @@ class DockerManager:
         )
         return result.returncode == 0 and result.stdout.strip() == "true"
 
+    def _wait_for_docker(self, max_wait: int = 60) -> None:
+        """Wait until the Docker daemon is reachable.
+
+        Retries every 5s for up to max_wait seconds. Raises RuntimeError
+        if the daemon never becomes available.
+        """
+        for attempt in range(max_wait // 5):
+            result = self._run(["docker", "version", "--format", "{{.Server.Version}}"], timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                return
+            if attempt == 0:
+                print(f"  Docker daemon not reachable, waiting up to {max_wait}s...", file=sys.stderr)
+            time.sleep(5)
+
+        raise RuntimeError(
+            "Docker daemon is not running. Please start Docker Desktop and try again."
+        )
+
     def ensure_running(self) -> None:
         """Build image and start container if not already running."""
         if self.container_id and self.is_running():
@@ -260,6 +316,7 @@ class DockerManager:
             # Container died, clean up and restart
             self._run(["docker", "rm", "-f", self.container_id])
             self.container_id = None
+        self._wait_for_docker()
         self.build_image()
         self.start_container()
 
