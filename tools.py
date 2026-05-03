@@ -1313,6 +1313,85 @@ _BASE_TOOL_DEFINITIONS = [
    }
   }
  },
+ {
+  "type": "function",
+  "function": {
+  "name": "list_errors",
+  "description": "List tracked errors from the error database, optionally filtered by type, severity, or resolved status.",
+  "parameters": {
+   "type": "object",
+   "properties": {
+    "limit": {
+     "type": "integer",
+     "description": "Number of results to return (default: 20)."
+    },
+    "offset": {
+     "type": "integer",
+     "description": "Pagination offset for fetching more results."
+    },
+    "error_type": {
+     "type": "string",
+     "description": "Optional filter by error type (exception, api_failure, tool_failure, agent_call, http_error, docker_error, mcp_error)."
+    },
+    "severity": {
+     "type": "string",
+     "description": "Optional filter by severity (low, medium, high, critical)."
+    },
+    "resolved": {
+     "type": "boolean",
+     "description": "Optional filter by resolved status."
+    }
+   },
+   "required": []
+  }
+ }
+ },
+ {
+  "type": "function",
+  "function": {
+  "name": "get_error_details",
+  "description": "Get full details of a specific tracked error, including stack trace and context.",
+  "parameters": {
+   "type": "object",
+   "properties": {
+    "error_id": {
+     "type": "integer",
+     "description": "The error ID from the error database."
+    }
+   },
+   "required": ["error_id"]
+  }
+ }
+ },
+ {
+  "type": "function",
+  "function": {
+  "name": "resolve_error",
+  "description": "Mark a tracked error as resolved after fixing it.",
+  "parameters": {
+   "type": "object",
+   "properties": {
+    "error_id": {
+     "type": "integer",
+     "description": "The error ID to mark as resolved."
+    }
+   },
+   "required": ["error_id"]
+  }
+ }
+ },
+ {
+  "type": "function",
+  "function": {
+  "name": "get_error_summary",
+  "description": "Get a summary of tracked errors, including counts by type and severity, and top recurring errors.",
+  "parameters": {
+   "type": "object",
+   "properties": {},
+   "required": []
+  }
+ }
+ },
 ]
 
 
@@ -1360,6 +1439,10 @@ _BASE_TOOL_HANDLERS = {
  "complete_task": _make_handler(complete_task),
  "ask_human": _make_handler(ask_human),
  "list_tasks": _make_handler(list_tasks),
+ "list_errors": _make_handler(list_errors),
+ "get_error_details": _make_handler(get_error_details),
+ "resolve_error": _make_handler(resolve_error),
+ "get_error_summary": _make_handler(get_error_summary),
 }
 
 
