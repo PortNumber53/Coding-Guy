@@ -94,7 +94,7 @@ project root.
 Available tools: read_file, write_file, patch_file, grep_file, ls_file, \
 execute_command, multi_read_file, multi_write_file, read_dockerfile, \
 write_dockerfile, rebuild_container, web, ask_ollama, \
-browser_navigate, browser_action, browser_get_content, browser_close.
+browser_navigate, browser_action, browser_get_content, browser_get_elements, browser_close.
 
 Task Tracking Tools:
 - create_task: Plan your work by creating a task with ordered steps before starting.
@@ -377,12 +377,25 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True,
     message = {"role": "assistant"}
     if content:
         message["content"] = content
-    if tool_calls_by_index:
-        message["tool_calls"] = [
-            tool_calls_by_index[i] for i in sorted(tool_calls_by_index)
-        ]
-
-    # Warn if message appears incomplete (stream interrupted)
+        # Filter out incomplete tool calls (missing id or function name)
+        complete_tool_calls = {}
+        for idx, tc in tool_calls_by_index.items():
+            if tc.get("id") and tc["function"].get("name"):
+                complete_tool_calls[idx] = tc
+            else:
+                missing = []
+                if not tc.get("id"):
+                    missing.append("id")
+                if not tc["function"].get("name"):
+                    missing.append("function name")
+                print(f"[Warning] Dropping incomplete tool call (index {idx}): missing {', '.join(missing)}", file=sys.stderr)
+        
+        if complete_tool_calls:
+            message["tool_calls"] = [
+                complete_tool_calls[i] for i in sorted(complete_tool_calls)
+            ]
+        
+        # Warn if message appears incomplete (stream interrupted)
     if content and not (content.endswith('.') or content.endswith('!') or content.endswith('?') or content.endswith('```')):
         print("[Warning] Response may be incomplete due to connection interruption", file=sys.stderr)
 
@@ -435,6 +448,11 @@ def execute_tool(name, arguments_str):
         print(f"[Raw arguments] {arguments_str}", file=sys.stderr)
         return json.dumps({"error": f"Invalid JSON arguments for {name}: {e}"})
 
+    # Guard against empty or whitespace-only tool names
+    if not name or not name.strip():
+        print("\n[Warning] LLM returned a tool call with empty function name, skipping", file=sys.stderr)
+        return json.dumps({"error": "Empty tool name received from LLM - this is likely a streaming assembly issue"})
+    
     handler = TOOL_HANDLERS.get(name)
     if not handler:
         return json.dumps({"error": f"Unknown tool: {name}"})
@@ -541,8 +559,12 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
         execute_tool._conversation_round = round_num
 
         for tc in tool_calls:
-            fn_name = tc["function"]["name"]
-            fn_args = tc["function"]["arguments"]
+            try:
+                fn_name = tc["function"]["name"]
+                fn_args = tc["function"]["arguments"]
+            except (KeyError, TypeError) as e:
+                print(f"\n[Warning] Malformed tool_call in response, skipping: {e}", file=sys.stderr)
+                continue
             result = execute_tool(fn_name, fn_args)
 
             # Show a preview of the result
