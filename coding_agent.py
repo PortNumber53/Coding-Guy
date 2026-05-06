@@ -565,6 +565,36 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
             except (KeyError, TypeError) as e:
                 print(f"\n[Warning] Malformed tool_call in response, skipping: {e}", file=sys.stderr)
                 continue
+
+        # Validate arguments look complete — detect truncated streaming assembly.
+        # Common patterns: empty args "", partial JSON like "{" or '{"path":'
+        if fn_args is None:
+            fn_args = ""
+        fn_args_stripped = fn_args.strip()
+        if fn_args_stripped and fn_args_stripped.startswith("{") and not fn_args_stripped.endswith("}"):
+            # Looks like truncated JSON — try to complete it
+            print(f"\n[Warning] Tool '{fn_name}' has truncated arguments, attempting repair", file=sys.stderr)
+            # Try adding closing braces — simplest repair
+            for closing in ("}", "}}", "]}"):
+                test = fn_args_stripped + closing
+                try:
+                    json.loads(test)
+                    fn_args = test
+                    print(f"[Repair] Completed arguments by adding '{closing}'", file=sys.stderr)
+                    break
+                except json.JSONDecodeError:
+                    continue
+            else:
+                # Could not repair — return error so LLM self-corrects
+                result = json.dumps({
+                    "error": f"Tool '{fn_name}' received malformed/truncated arguments that could not be repaired",
+                    "raw_args_preview": fn_args_stripped[:200],
+                    "hint": "The arguments JSON was incomplete, likely due to a stream interruption. Please retry with complete arguments.",
+                })
+                print(f" <- {result[:200]}", file=sys.stderr)
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                continue
+        
             result = execute_tool(fn_name, fn_args)
 
             # Show a preview of the result

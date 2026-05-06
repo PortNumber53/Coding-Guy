@@ -107,7 +107,14 @@ def patch_file(path: str = "", patches: list[dict] | None = None) -> str:
     if not path:
         return json.dumps({"error": "Missing required argument: path"})
     if not patches:
-        return json.dumps({"error": "Missing or empty required argument: patches"})
+        return json.dumps({
+            "error": "Missing or empty required argument: patches",
+            "hint": (
+                "The 'patches' parameter must be a list of dicts, e.g. "
+                "patches=[{'old': 'text to find', 'new': 'replacement'}]. "
+                "Do NOT pass 'old' and 'new' as separate top-level arguments."
+            ),
+        })
     dm = _get_docker_manager()
     rc, content, stderr = dm.exec(["cat", path])
     if rc != 0:
@@ -1395,18 +1402,81 @@ _BASE_TOOL_DEFINITIONS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Argument repair — fixes common LLM mistakes before calling the handler
+# ---------------------------------------------------------------------------
+
+# Maps tool_name → {outer_param: list_of_inner_keys} for tools where the LLM
+# commonly flattens a nested array-of-dicts parameter into top-level keys.
+_ARGUMENT_REPAIR_MAP = {
+    "patch_file": {"patches": ["old", "new"]},
+}
+
+
+def _repair_tool_args(tool_name: str, args: dict) -> dict:
+    """Auto-repair common LLM argument mistakes.
+
+    Currently handles:
+    - patch_file: LLM sends old=..., new=... as top-level args instead of
+      wrapping them in patches=[{"old": ..., "new": ...}]
+    - Type coercion: dict→list wrapping for singleton array params
+    """
+    import sys
+    repaired = dict(args)
+    repair_spec = _ARGUMENT_REPAIR_MAP.get(tool_name)
+    if not repair_spec:
+        return repaired
+
+    for outer_param, inner_keys in repair_spec.items():
+        # Only repair if the outer param is missing/empty AND the inner keys
+        # are present at the top level
+        outer_val = repaired.get(outer_param)
+        has_outer = outer_val is not None and outer_val != [] and outer_val != {}
+        has_inner = all(k in repaired for k in inner_keys)
+
+        if not has_outer and has_inner:
+            # Build the nested structure from the top-level keys
+            patch_dict = {k: repaired.pop(k) for k in inner_keys}
+            repaired[outer_param] = [patch_dict]
+            inner_keys_str = "/".join(inner_keys)
+            print(f"[Auto-repair] {tool_name}: promoted '{inner_keys_str}' -> {outer_param}=[{{...}}]",
+                  file=sys.stderr)
+
+        # Also fix if outer_param is a single dict instead of a list of dicts
+        if outer_param in repaired and isinstance(repaired[outer_param], dict):
+            repaired[outer_param] = [repaired[outer_param]]
+            print(f"[Auto-repair] {tool_name}: wrapped {outer_param} dict -> list",
+                  file=sys.stderr)
+
+    return repaired
+
+
 def _make_handler(func):
- """Create a handler that filters out unexpected keyword arguments."""
- valid_params = set(inspect.signature(func).parameters.keys())
+    """Create a handler that filters unexpected kwargs AND auto-repairs common LLM mistakes."""
+    import sys
+    func_name = func.__name__
+    valid_params = set(inspect.signature(func).parameters.keys())
 
- def handler(args):
-  filtered = {k: v for k, v in args.items() if k in valid_params}
-  try:
-   return func(**filtered)
-  except TypeError as e:
-   return json.dumps({"error": f"Missing or invalid arguments for {func.__name__}: {e}"})
+    def handler(args):
+        # Auto-repair common argument mistakes before filtering
+        args = _repair_tool_args(func_name, args)
 
- return handler
+        # Split into known and unknown args
+        known = {k: v for k, v in args.items() if k in valid_params}
+        unknown = {k: v for k, v in args.items() if k not in valid_params}
+
+        if unknown:
+            unknown_keys = ", ".join(unknown.keys())
+            print(f"[Warning] {func_name}: unexpected arguments dropped: {unknown_keys}",
+                  file=sys.stderr)
+
+        try:
+            return func(**known)
+        except TypeError as e:
+            return json.dumps({"error": f"Missing or invalid arguments for {func_name}: {e}"})
+
+    return handler
+
 
 
 # Map function names to callables (handlers filter unexpected kwargs from LLM)
