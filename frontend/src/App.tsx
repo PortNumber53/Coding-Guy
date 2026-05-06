@@ -1,148 +1,121 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import cloudflareLogo from './assets/cloudflare.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { useState, useRef, useEffect, useMemo } from 'react';
+import { useWebSocket } from './hooks/useWebSocket';
+import ActivityFeed from './components/ActivityFeed';
+import ConnectionIndicator from './components/ConnectionIndicator';
+import StatsPanel from './components/StatsPanel';
+import type { ActivityEvent } from './types';
+import './App.css';
+
+// Default WebSocket URL - can be overridden via env or URL param
+const getWsUrl = () => {
+  const params = new URLSearchParams(window.location.search);
+  const fromParam = params.get('ws');
+  if (fromParam) return fromParam;
+  const fromEnv = import.meta.env.VITE_WS_URL;
+  if (fromEnv) return fromEnv as string;
+  // Default: same host, port 8765
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.hostname}:8765`;
+};
 
 function App() {
-  const [count, setCount] = useState(0)
-  const [name, setName] = useState('unknown')
+  const [wsUrl, setWsUrl] = useState(getWsUrl);
+  const [urlInput, setUrlInput] = useState(getWsUrl());
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [showStats, setShowStats] = useState(true);
+  const feedRef = useRef<HTMLDivElement>(null);
+
+  const { events, connectionStatus, clearEvents } = useWebSocket(wsUrl);
+
+  // Auto-scroll to bottom when new events arrive
+  useEffect(() => {
+    if (autoScroll && feedRef.current) {
+      const el = feedRef.current.querySelector('.feed-events');
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [events, autoScroll]);
+
+  // Compute accumulated text from text_chunk events
+  const accumulatedText = useMemo(() => {
+    return events
+      .filter((e: ActivityEvent) => e.type === 'text_chunk')
+      .map((e: ActivityEvent) => String(e.data.text || ''))
+      .join('');
+  }, [events]);
+
+  const handleUrlSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setWsUrl(urlInput);
+  };
+
+  const handleReconnect = () => {
+    // Force reconnection by toggling the URL
+    setWsUrl('');
+    setTimeout(() => setWsUrl(urlInput), 100);
+  };
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
+    <div className="app">
+      <header className="app-header">
+        <div className="header-left">
+          <h1>🤖 Coding Guy</h1>
+          <span className="header-subtitle">Agent Activity Monitor</span>
         </div>
-        <div>
-          <h1>Get started with Cloudflare</h1>
-          <p>
-            Edit <code>src/App.tsx</code> or <code>worker/index.ts</code> and save to test <code>HMR</code>
-          </p>
+        <div className="header-right">
+          <ConnectionIndicator status={connectionStatus} onReconnect={handleReconnect} />
+          <form className="url-form" onSubmit={handleUrlSubmit}>
+            <input
+              type="text"
+              className="url-input"
+              value={urlInput}
+              onChange={e => setUrlInput(e.target.value)}
+              placeholder="ws://localhost:8765"
+              title="WebSocket server URL"
+            />
+            <button type="submit" className="btn-connect">Connect</button>
+          </form>
         </div>
-        <ul style={{ display: 'flex', gap: '1rem', listStyle: 'none', padding: 0 }}>
-          <li>
-            <button
-              className="counter"
-              onClick={() => setCount((count) => count + 1)}
-            >
-              Count is {count}
-            </button>
-          </li>
-          <li>
-          <button
-            className="counter"
-            onClick={() => {
-              fetch('/api/')
-                .then((res) => res.json())
-                .then((data) => setName(data.name))
-            }}
-            aria-label='get name'
-          >
-            Name from API is: {name}
-          </button>
-          </li>
-        </ul>
+      </header>
 
+      <div className="app-body">
+        <aside className={`sidebar ${showStats ? '' : 'sidebar-collapsed'}`}>
+          <div className="sidebar-toggle" onClick={() => setShowStats(!showStats)}>
+            {showStats ? '◀' : '▶'} Stats
+          </div>
+          {showStats && <StatsPanel events={events} />}
+        </aside>
 
-      </section>
+        <main className="main-content" ref={feedRef}>
+          <div className="feed-toolbar">
+            <label className="auto-scroll-toggle">
+              <input
+                type="checkbox"
+                checked={autoScroll}
+                onChange={e => setAutoScroll(e.target.checked)}
+              />
+              Auto-scroll
+            </label>
+            {accumulatedText && (
+              <div className="accumulated-text">
+                <strong>Agent Output:</strong>
+                <pre className="output-preview">{accumulatedText.slice(-500)}</pre>
+              </div>
+            )}
+          </div>
 
-      <div className="ticks"></div>
+          <ActivityFeed events={events} onClear={clearEvents} />
+        </main>
+      </div>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-            <li>
-              <a href="https://workers.cloudflare.com/" target="_blank">
-                <img className="button-icon" src={cloudflareLogo} alt="" />
-                Workers Docs
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+      <footer className="app-footer">
+        <span>Coding Guy Agent Dashboard</span>
+        <span className="footer-separator">·</span>
+        <span>WebSocket: {wsUrl.replace(/^wss?:\/\//, '')}</span>
+        <span className="footer-separator">·</span>
+        <span>Events: {events.length}</span>
+      </footer>
+    </div>
+  );
 }
 
-export default App
+export default App;

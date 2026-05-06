@@ -1424,7 +1424,7 @@ def main():
                 tm.unblock_task(active_task.uuid, user_input)
 
             reply, status = agent_loop(user_input, conversation_history, api_key, invoke_url, model_name, docker,
-                                       session_key="cli")
+                                       session_key="cli", activity_callback=_activity_cb)
 
             if status == STATUS_MAX_ROUNDS:
                 print("[Note: reached maximum tool rounds, response may be incomplete]", file=sys.stderr)
