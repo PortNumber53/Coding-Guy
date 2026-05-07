@@ -648,6 +648,51 @@ def get_error_summary() -> str:
     return json.dumps(tracker.get_error_summary(), default=str)
 
 
+
+# --- Semantic tool search tools ---
+
+def search_tools(query: str = "", top_k: int = 10) -> str:
+    """Search for tools that match a task description using semantic search."""
+    if not query:
+        return json.dumps({"error": "Missing required argument: query"})
+    try:
+        from tool_search import get_tool_search
+        engine = get_tool_search()
+        if engine and engine.is_initialized:
+            results = engine.search(query, top_k=top_k, include_descriptions=True)
+            from tool_search_integration import get_outcome_logger
+            logger = get_outcome_logger()
+            for r in results:
+                boost = logger.get_relevance_boost(r["name"])
+                r["score"] = round(min(1.0, r["score"] * boost), 4)
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return json.dumps({"query": query, "results": results[:top_k],
+                              "backend": engine.backend_name}, default=str)
+    except Exception:
+        pass
+    try:
+        from tool_search import keyword_search
+        from tool_registry import get_registry
+        registry = get_registry()
+        results = keyword_search(query, registry, top_k=top_k)
+        tool_results = [{"name": n, "score": round(s, 3), "source": "keyword"} for n, s in results]
+        return json.dumps({"query": query, "results": tool_results, "source": "keyword"})
+    except Exception as e:
+        return json.dumps({"error": f"Tool search failed: {e}"})
+
+
+def search_tools_by_capability(capabilities: list[str] | None = None,
+                                task_description: str = "") -> str:
+    """Find tools matching a list of required capabilities."""
+    if not capabilities:
+        return json.dumps({"error": "Missing required argument: capabilities"})
+    try:
+        from tool_search_integration import architect_handoff
+        result = architect_handoff(task_description or "untitled task", capabilities)
+        return json.dumps(result, default=str)
+    except Exception as e:
+        return json.dumps({"error": f"Capability search failed: {e}"})
+
 # --- Tool definitions for the OpenAI-compatible tool-calling API ---
 
 _BASE_TOOL_DEFINITIONS = [
@@ -1399,8 +1444,58 @@ _BASE_TOOL_DEFINITIONS = [
   }
  }
  },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_tools",
+            "description": (
+                "Search for tools that match a task description using semantic search. "
+                "When you need to find the right tool but aren't sure which one to use, "
+                "describe what you need and this returns ranked tool suggestions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language description of what you need the tool to do."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: 10)."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_tools_by_capability",
+            "description": (
+                "Find tools matching a list of required capabilities. "
+                "Given capability descriptions, returns tools grouped by "
+                "capability with relevance scores."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "capabilities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of capability descriptions to search for."
+                    },
+                    "task_description": {
+                        "type": "string",
+                        "description": "Optional task context for the search."
+                    }
+                },
+                "required": ["capabilities"]
+            }
+        }
+    },
 ]
-
 
 # ---------------------------------------------------------------------------
 # Argument repair — fixes common LLM mistakes before calling the handler
@@ -1513,6 +1608,8 @@ _BASE_TOOL_HANDLERS = {
  "get_error_details": _make_handler(get_error_details),
  "resolve_error": _make_handler(resolve_error),
  "get_error_summary": _make_handler(get_error_summary),
+    "search_tools": _make_handler(search_tools),
+    "search_tools_by_capability": _make_handler(search_tools_by_capability),
 }
 
 

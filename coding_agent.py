@@ -47,6 +47,9 @@ from error_tracker import (
 
 load_dotenv()
 
+# Semantic tool search — lazy imports to avoid hard dependency
+_tool_search_engine = None  # Set during main() init if --semantic-search
+
 INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 MODEL = "z-ai/glm-5.1"
 
@@ -86,35 +89,12 @@ def _get_commit_hash() -> str:
 
 COMMIT_HASH = _get_commit_hash()
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert coding agent. All file operations execute inside a Docker sandbox \
 with the project directory mounted at /workspace. File paths are relative to the \
 project root.
 
-Available tools: read_file, write_file, patch_file, grep_file, ls_file, \
-execute_command, multi_read_file, multi_write_file, read_dockerfile, \
-write_dockerfile, rebuild_container, web, ask_ollama, \
-browser_navigate, browser_action, browser_get_content, browser_get_elements, browser_close.
-
-Task Tracking Tools:
-- create_task: Plan your work by creating a task with ordered steps before starting.
-- update_task_step: Mark steps in_progress, completed, failed, or skipped as you work.
-- complete_task: Mark the overall task as done when finished.
-- ask_human: Pause and ask the human a question when you need their input.
-- list_tasks: View current tasks and their status.
-
-Suno Music Tools (when SUNO_API_KEY is configured):
-- suno_generate_song: Generate AI music with custom lyrics and style
-- suno_get_job_status: Check generation progress
-- suno_get_song_data: Get song metadata and download URLs
-- suno_list_songs: Browse generated songs
-- suno_delete_song: Remove a generated song
-
-Error Tracking Tools (for self-healing and debugging):
-- list_errors: List tracked errors from the error database.
-- get_error_details: Get full details of a specific error (stack trace, context).
-- resolve_error: Mark an error as resolved after fixing it.
-- get_error_summary: Get error statistics and top recurring errors.
+{tool_list_section}
 
 When given a task:
 1. Use create_task to plan your work with concrete steps.
@@ -166,6 +146,77 @@ Use the tools provided to complete the user's request. Be precise with file path
 and edits. Prefer patch_file over write_file when modifying existing files.\
 """
 
+# Static tool list section — used when semantic search is disabled
+_STATIC_TOOL_LIST_SECTION = """\
+Available tools: read_file, write_file, patch_file, grep_file, ls_file, \
+execute_command, multi_read_file, multi_write_file, read_dockerfile, \
+write_dockerfile, rebuild_container, web, ask_ollama, \
+browser_navigate, browser_action, browser_get_content, browser_get_elements, browser_close.
+
+Task Tracking Tools:
+- create_task: Plan your work by creating a task with ordered steps before starting.
+- update_task_step: Mark steps in_progress, completed, failed, or skipped as you work.
+- complete_task: Mark the overall task as done when finished.
+- ask_human: Pause and ask the human a question when you need their input.
+- list_tasks: View current tasks and their status.
+
+Suno Music Tools (when SUNO_API_KEY is configured):
+- suno_generate_song: Generate AI music with custom lyrics and style
+- suno_get_job_status: Check generation progress
+- suno_get_song_data: Get song metadata and download URLs
+- suno_list_songs: Browse generated songs
+- suno_delete_song: Remove a generated song
+
+Error Tracking Tools (for self-healing and debugging):
+- list_errors: List tracked errors from the error database.
+- get_error_details: Get full details of a specific error (stack trace, context).
+- resolve_error: Mark an error as resolved after fixing it.
+- get_error_summary: Get error statistics and top recurring errors."""
+
+
+def build_tool_list_section(user_input: str = "") -> str:
+    """Build the tool list section for the system prompt.
+
+    If semantic search is enabled and the search engine is initialized:
+    - Pre-computes relevant tools for the task description
+    - Returns a focused subset of tools ranked by relevance
+    Otherwise, returns the full static tool list.
+    """
+    global _tool_search_engine
+
+    if _tool_search_engine is None or not user_input:
+        return _STATIC_TOOL_LIST_SECTION
+
+    try:
+        from tool_search_integration import select_tools_for_task
+        results = select_tools_for_task(user_input, top_k=15, search_engine=_tool_search_engine)
+
+        if not results:
+            return _STATIC_TOOL_LIST_SECTION
+
+        # Build focused tool list from search results
+        lines = ["Available tools (ranked by relevance to this task):"]
+        for r in results:
+            name = r["name"]
+            desc = r.get("description", "").split(".")[0] + "."  # First sentence only
+            score = r.get("score", 0)
+            source = r.get("source", "")
+            lines.append(f"- {name}: {desc} [relevance: {score:.2f}]")
+
+        # Add all other tools as a secondary list
+        all_tool_names = {tdef["function"]["name"] for tdef in TOOL_DEFINITIONS}
+        ranked_names = {r["name"] for r in results}
+        remaining = sorted(all_tool_names - ranked_names)
+        if remaining:
+            lines.append("")
+            lines.append("Other available tools: " + ", ".join(remaining))
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"[ToolSearch] Warning: semantic tool selection failed: {e}", file=sys.stderr)
+        return _STATIC_TOOL_LIST_SECTION
+
 
 def get_api_key():
     """Get an API key from the pool or environment."""
@@ -194,7 +245,7 @@ def get_pool_key():
 
 
 def build_messages(conversation_history, user_input, docker_manager=None, session_key=None):
-    system = SYSTEM_PROMPT
+    system = SYSTEM_PROMPT_TEMPLATE.format(tool_list_section=build_tool_list_section(user_input))
     if docker_manager and docker_manager.startup_warnings:
         warnings = "\n".join(docker_manager.startup_warnings)
         system += (
@@ -655,6 +706,19 @@ def main():
     parser.add_argument("--openrouter", action="store_true", help="Use OpenRouter API instead of Nvidia API")
     parser.add_argument("--model", type=str, help="Override the model to use (default: gemma4:e4b for Ollama)")
     parser.add_argument("--api-base", type=str, help="Override the API base URL")
+    # Semantic tool search arguments
+    parser.add_argument(
+        "--semantic-search", action="store_true",
+        help="Enable semantic tool search to rank tools by relevance to each task",
+    )
+    parser.add_argument(
+        "--search-model", type=str, default=None,
+        help="Embedding model for tool search (default: auto-select best available)",
+    )
+    parser.add_argument(
+        "--search-verbose", action="store_true", default=False,
+        help="Enable verbose color-coded logging of semantic search scores",
+    )
     # Rate limiting arguments
     parser.add_argument(
         "--rate-limit-strategy",
@@ -779,6 +843,36 @@ def main():
         refresh_mcp_tools(mcp_client)
         print(f"MCP support: {len(mcp_client.servers)} server(s) connected, {len(TOOL_DEFINITIONS)} total tools available", file=sys.stderr)
 
+    # Initialize semantic tool search if requested
+    global _tool_search_engine
+    if args.semantic_search:
+        try:
+            from tool_search import init_tool_search
+            from tool_registry import reset_name_index
+            reset_name_index()  # Rebuild index after MCP tools loaded
+
+            emb_api_key = ""
+            emb_base_url = ""
+            if args.openrouter:
+                emb_api_key = get_openrouter_api_key()
+                emb_base_url = "https://openrouter.ai/api/v1"
+
+            _tool_search_engine = init_tool_search(
+                api_key=emb_api_key,
+                api_base_url=emb_base_url,
+                embedding_model=args.search_model or "",
+                verbose=args.search_verbose,
+                use_cache=True,
+            )
+            if _tool_search_engine:
+                print(f"Semantic tool search: enabled (backend={_tool_search_engine.backend_name}, "
+                      f"{_tool_search_engine.tool_count} tools indexed)", file=sys.stderr)
+            else:
+                print("Semantic tool search: initialization failed, using static tool list", file=sys.stderr)
+        except Exception as e:
+            print(f"Semantic tool search: init error: {e}", file=sys.stderr)
+            _tool_search_engine = None
+
     if args.serve:
         from telegram_bot import run_telegram_bot
         try:
@@ -803,6 +897,8 @@ def main():
     else:
         print(f"Nvidia Coding Agent (Model: {model_name})", file=sys.stderr)
     print("Tools: read_file, write_file, patch_file, grep_file, ls_file, execute_command, multi_read_file, multi_write_file, read_dockerfile, write_dockerfile, rebuild_container, web, ask_ollama", file=sys.stderr)
+    if _tool_search_engine:
+        print(f"Semantic search: enabled (backend={_tool_search_engine.backend_name})", file=sys.stderr)
     print("Docker sandbox: files are isolated in a container.", file=sys.stderr)
     print("Type 'quit' to exit, 'clear' to reset conversation.\n", file=sys.stderr)
 
@@ -844,6 +940,12 @@ def main():
                 conversation_history.append({"role": "assistant", "content": reply})
                 print()
     finally:
+        # Save outcome logger data before exit
+        try:
+            from tool_search_integration import get_outcome_logger
+            get_outcome_logger().save()
+        except Exception:
+            pass
         docker.cleanup()
 
 
