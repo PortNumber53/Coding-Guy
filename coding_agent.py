@@ -380,6 +380,7 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True,
     # Stream and reassemble the full message (content + tool_calls)
     content_parts = []
     tool_calls_by_index = {}
+    finish_reason = None  # Track why the model stopped generating
 
     for line in response.iter_lines():
         if not line:
@@ -392,7 +393,12 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True,
             break
         try:
             chunk = json.loads(data_str)
-            delta = chunk["choices"][0].get("delta", {})
+            choice = chunk["choices"][0]
+            delta = choice.get("delta", {})
+
+            # Track finish_reason (appears in the final chunk)
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
 
             # Text content
             if delta.get("content"):
@@ -424,29 +430,42 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True,
     if content:
         print(file=sys.stderr)  # newline after streamed text
 
+    # Log finish_reason for diagnostics
+    if finish_reason == "length":
+        print(f"\n[Warning] Model hit max_tokens limit \u2014 tool calls may be truncated", file=sys.stderr)
+    elif finish_reason == "content_filter":
+        print(f"\n[Warning] Model response filtered \u2014 output may be incomplete", file=sys.stderr)
+
     # Build the assembled message
     message = {"role": "assistant"}
     if content:
         message["content"] = content
-        # Filter out incomplete tool calls (missing id or function name)
-        complete_tool_calls = {}
-        for idx, tc in tool_calls_by_index.items():
-            if tc.get("id") and tc["function"].get("name"):
-                complete_tool_calls[idx] = tc
-            else:
-                missing = []
-                if not tc.get("id"):
-                    missing.append("id")
-                if not tc["function"].get("name"):
-                    missing.append("function name")
-                print(f"[Warning] Dropping incomplete tool call (index {idx}): missing {', '.join(missing)}", file=sys.stderr)
-        
-        if complete_tool_calls:
-            message["tool_calls"] = [
-                complete_tool_calls[i] for i in sorted(complete_tool_calls)
-            ]
-        
-        # Warn if message appears incomplete (stream interrupted)
+    # Filter out incomplete tool calls (missing id or function name)
+    complete_tool_calls = {}
+    for idx, tc in tool_calls_by_index.items():
+        if tc.get("id") and tc["function"].get("name"):
+            # If the model hit max_tokens, mark tool calls as potentially truncated
+            if finish_reason == "length":
+                tc["_potentially_truncated"] = True
+            complete_tool_calls[idx] = tc
+        else:
+            missing = []
+            if not tc.get("id"):
+                missing.append("id")
+            if not tc["function"].get("name"):
+                missing.append("function name")
+            print(f"[Warning] Dropping incomplete tool call (index {idx}): missing {', '.join(missing)}", file=sys.stderr)
+
+    if complete_tool_calls:
+        message["tool_calls"] = [
+            complete_tool_calls[i] for i in sorted(complete_tool_calls)
+        ]
+
+    # Store finish_reason so agent_loop can use it
+    if finish_reason:
+        message["_finish_reason"] = finish_reason
+
+    # Warn if message appears incomplete (stream interrupted)
     if content and not (content.endswith('.') or content.endswith('!') or content.endswith('?') or content.endswith('```')):
         print("[Warning] Response may be incomplete due to connection interruption", file=sys.stderr)
 
@@ -525,6 +544,205 @@ def execute_tool(name, arguments_str):
         )
         result = json.dumps({"error": f"Tool '{name}' raised {type(exc).__name__}: {str(exc)}"})
     return result
+
+
+def _validate_tool_args(tool_name: str, args: dict) -> tuple[dict, list[str]]:
+    """Validate that repaired tool arguments have all required parameters.
+
+    Returns (repaired_args, list_of_missing_required_params).
+    """
+    missing = []
+    # Find the tool definition to check required params
+    for tdef in TOOL_DEFINITIONS:
+        if tdef["function"]["name"] == tool_name:
+            required = tdef["function"].get("parameters", {}).get("required", [])
+            for param in required:
+                if param not in args or args[param] is None or args[param] == "":
+                    missing.append(param)
+            break
+    return args, missing
+
+
+def _repair_truncated_json(fn_name: str, raw_args: str, potentially_truncated: bool = False) -> tuple[str, bool, str]:
+    """Attempt to repair truncated JSON tool arguments.
+
+    Returns (repaired_args, success, reason).
+    If success is False, the tool call should be rejected with an error message.
+    """
+    fn_args_stripped = raw_args.strip()
+
+    if not fn_args_stripped:
+        return "{}", True, "empty args"
+
+    # Case 1: Already valid JSON — nothing to repair
+    if fn_args_stripped.endswith("}") or fn_args_stripped.endswith("]"):
+        try:
+            json.loads(fn_args_stripped)
+            return fn_args_stripped, True, "already valid"
+        except json.JSONDecodeError:
+            pass  # Structurally complete but invalid — fall through
+
+    # Case 2: Starts with { but doesn't end with } — likely truncated mid-stream
+    if fn_args_stripped.startswith("{") and not fn_args_stripped.endswith("}"):
+        # If the model hit max_tokens, repair is very likely to produce garbage
+        if potentially_truncated:
+            # Try repair but with strict validation
+            for closing in ("}", "}}", "]}", '"}]', '"}'):
+                test = fn_args_stripped + closing
+                try:
+                    parsed = json.loads(test)
+                    # After repair, validate that string values aren't truncated
+                    truncated_values = _detect_truncated_values(parsed)
+                    if truncated_values:
+                        return "", False, (
+                            f"Arguments truncated at max_tokens — repaired JSON valid but "
+                            f"values appear incomplete: {', '.join(truncated_values[:3])}. "
+                            f"Please retry with complete arguments."
+                        )
+                    return test, True, f"repaired with '{closing}'"
+                except json.JSONDecodeError:
+                    continue
+            return "", False, "Could not repair truncated JSON — no closing brace combination worked"
+
+        # Not a max_tokens truncation — more likely a minor stream glitch, try repair
+        print(f"\n[Warning] Tool '{fn_name}' has truncated arguments, attempting repair", file=sys.stderr)
+    for closing in ("}", "}}", "]}", '"]}', '"}]', '"}'):
+            test = fn_args_stripped + closing
+            try:
+                parsed = json.loads(test)
+                # Check for truncated values even in non-max_tokens case
+                truncated_values = _detect_truncated_values(parsed)
+                if truncated_values:
+                    print(f"[Repair] JSON structure repaired, but values may be truncated: {', '.join(truncated_values[:3])}", file=sys.stderr)
+                    # For non-max_tokens cases, still try to execute — the handler may
+                    # have defaults, or the LLM can self-correct on the next round
+                return test, True, f"repaired with '{closing}'"
+            except json.JSONDecodeError:
+                continue
+
+    # Fall through: either repair failed in Case 2, or args don't look like JSON
+    if fn_args_stripped.startswith("{"):
+        # Case 2b: Started with { but all closing combos failed
+        return "", False, (
+            f"Tool '{fn_name}' received malformed/truncated arguments that could not be repaired. "
+            f"Please retry with complete arguments."
+        )
+    else:
+        # Case 3: Doesn't look like JSON at all
+        return "", False, f"Tool '{fn_name}' received non-JSON arguments: {fn_args_stripped[:100]}"
+
+
+def _detect_truncated_values(obj, path="") -> list[str]:
+    """Detect values in a parsed JSON dict that appear truncated.
+
+    Checks for:
+    - Unclosed brackets in string values (e.g. "some text [without closing")
+    - Strings ending mid-word (no final punctuation/closing)
+    - Strings that look like they were cut off mid-expression
+    """
+    truncated = []
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            child_path = f"{path}.{key}" if path else key
+            if isinstance(val, str):
+                if _looks_truncated_string(val):
+                    truncated.append(child_path)
+            elif isinstance(val, (dict, list)):
+                truncated.extend(_detect_truncated_values(val, child_path))
+    elif isinstance(obj, list):
+        for i, val in enumerate(obj):
+            child_path = f"{path}[{i}]"
+            if isinstance(val, str):
+                if _looks_truncated_string(val):
+                    truncated.append(child_path)
+            elif isinstance(val, (dict, list)):
+                truncated.extend(_detect_truncated_values(val, child_path))
+    return truncated
+
+
+def _looks_truncated_string(s: str) -> bool:
+    """Heuristic: does this string look like it was cut off mid-stream?
+
+    Returns True if the string appears to be an incomplete fragment
+    rather than a complete value.
+
+    Confidence levels:
+    - HIGH: ends with comma/colon/unmatched brackets/backtick
+    - MODERATE: long string with no sentence-ending punctuation,
+      last word is a common mid-sentence word (article, preposition, etc.)
+    - MODERATE: very long string with no sentence-ending punctuation
+      ending with alphanumeric (likely truncated before completing a sentence)
+    """
+    if not s or len(s) < 10:
+        return False
+
+    s_stripped = s.rstrip()
+
+    # === HIGH confidence indicators ===
+
+    # Ends with comma, colon, or shell continuation operators
+    # (mid-JSON, mid-arg-list, mid-code, or shell pipeline)
+    if s_stripped.endswith(',') or s_stripped.endswith(':'):
+        return True
+    # Shell command continuation: 'cd /workspace && ' stripped to '&&'
+    for trailing_op in ('&&', '||', '|', ';'):
+        if s_stripped.endswith(trailing_op):
+            return True
+
+
+    # Unmatched brackets/parens (incomplete code/expression)
+    for open_ch, close_ch in [('(', ')'), ('[', ']'), ('{', '}')]:
+        if s_stripped.count(open_ch) > s_stripped.count(close_ch):
+            return True
+
+    # Ends with opening backtick (mid-code-block)
+    if s_stripped.endswith('`'):
+        return True
+
+    # === MODERATE confidence indicators ===
+    # These require the string to be long enough that false positives are unlikely
+
+    # Check for no sentence-ending punctuation anywhere in the string
+    has_any_sentence_end = any(c in s_stripped for c in '.!?')
+
+    if not has_any_sentence_end:
+        last_word = s_stripped.rsplit(None, 1)[-1] if s_stripped else ""
+
+        # Common mid-sentence words that strongly suggest truncation
+        # when appearing at the END of a string with no periods
+        mid_sentence_words = {
+            'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of',
+            'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be',
+            'has', 'have', 'had', 'do', 'does', 'did', 'will', 'can',
+            'and', 'or', 'but', 'if', 'then', 'than', 'that', 'which',
+            'who', 'how', 'when', 'where', 'what', 'not', 'don', 'won',
+            'into', 'onto', 'upon', 'over', 'under', 'between', 'through',
+            'mid', 'during', 'before', 'after', 'until', 'since',
+        }
+        if last_word.lower() in mid_sentence_words and len(s_stripped) > 20:
+            return True
+
+        # Long string ending with alphanumeric, no sentence-ending punctuation
+        # e.g. "Explore the workspace structure to understand what's prese"
+        # Common complete words that should NOT be flagged
+        common_complete_words = {
+            'done', 'complete', 'finished', 'ok', 'yes', 'no',
+            'true', 'false', 'success', 'error', 'end', 'start',
+            'begin', 'ready', 'pass', 'fail', 'works',
+            'installed', 'running', 'active', 'enabled', 'disabled',
+            'added', 'removed', 'updated', 'created', 'deleted',
+            'verified', 'checked', 'fixed', 'resolved', 'implemented',
+            'found', 'exists', 'missing', 'present', 'available',
+            'module', 'package', 'project', 'config', 'server', 'client',
+'service', 'handler', 'router', 'model', 'view', 'controller',
+'component', 'plugin', 'script', 'command', 'function', 'class',
+        }
+        if (last_word and last_word[-1].isalnum()
+                and last_word.lower() not in common_complete_words
+                and len(s_stripped) > 35):
+            return True
+
+    return False
 
 
 def agent_loop(user_input, conversation_history, api_key, invoke_url, model, docker_manager=None,
@@ -609,43 +827,64 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
         execute_tool._session_key = session_key or ""
         execute_tool._conversation_round = round_num
 
-        for tc in tool_calls:
-            try:
-                fn_name = tc["function"]["name"]
-                fn_args = tc["function"]["arguments"]
-            except (KeyError, TypeError) as e:
-                print(f"\n[Warning] Malformed tool_call in response, skipping: {e}", file=sys.stderr)
-                continue
+    # Detect if model hit max_tokens — tool calls from this response are suspect
+    finish_reason = assistant_msg.pop("_finish_reason", None)
+    potentially_truncated = (finish_reason == "length")
 
-        # Validate arguments look complete — detect truncated streaming assembly.
-        # Common patterns: empty args "", partial JSON like "{" or '{"path":'
+    for tc in tool_calls:
+        try:
+            fn_name = tc["function"]["name"]
+            fn_args = tc["function"].get("arguments", "")
+        except (KeyError, TypeError) as e:
+            print(f"\n[Warning] Malformed tool_call in response, skipping: {e}", file=sys.stderr)
+            continue
+
+        # Check if this specific tool call was flagged as potentially truncated
+        tc_potentially_truncated = potentially_truncated or tc.pop("_potentially_truncated", False)
+
+        # Validate and repair arguments
         if fn_args is None:
             fn_args = ""
         fn_args_stripped = fn_args.strip()
+
+        # Repair truncated JSON using the improved repair function
         if fn_args_stripped and fn_args_stripped.startswith("{") and not fn_args_stripped.endswith("}"):
-            # Looks like truncated JSON — try to complete it
-            print(f"\n[Warning] Tool '{fn_name}' has truncated arguments, attempting repair", file=sys.stderr)
-            # Try adding closing braces — simplest repair
-            for closing in ("}", "}}", "]}"):
-                test = fn_args_stripped + closing
-                try:
-                    json.loads(test)
-                    fn_args = test
-                    print(f"[Repair] Completed arguments by adding '{closing}'", file=sys.stderr)
-                    break
-                except json.JSONDecodeError:
-                    continue
+            repaired_args, repair_ok, repair_reason = _repair_truncated_json(
+                fn_name, fn_args_stripped, potentially_truncated=tc_potentially_truncated
+            )
+            if repair_ok:
+                fn_args = repaired_args
+                if not tc_potentially_truncated:
+                    print(f"\n[Repair] Tool '{fn_name}' arguments repaired: {repair_reason}", file=sys.stderr)
+                else:
+                    print(f"\n[Warning] Tool '{fn_name}' arguments repaired after max_tokens truncation: {repair_reason}", file=sys.stderr)
             else:
-                # Could not repair — return error so LLM self-corrects
+                # Repair failed — return error so LLM retries with complete args
                 result = json.dumps({
-                    "error": f"Tool '{fn_name}' received malformed/truncated arguments that could not be repaired",
+                    "error": repair_reason,
                     "raw_args_preview": fn_args_stripped[:200],
-                    "hint": "The arguments JSON was incomplete, likely due to a stream interruption. Please retry with complete arguments.",
+                    "hint": "The arguments JSON was incomplete, likely due to a token limit. Retry the same tool call with shorter, complete arguments.",
                 })
                 print(f" <- {result[:200]}", file=sys.stderr)
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
                 continue
-        
+
+        # Even after successful JSON repair, validate required parameters exist
+        try:
+            parsed_args = _parse_tool_args(fn_args)
+            _, missing_required = _validate_tool_args(fn_name, parsed_args)
+            if missing_required and tc_potentially_truncated:
+                # max_tokens truncation + missing required args = definitely broken
+                result = json.dumps({
+                    "error": f"Tool '{fn_name}' is missing required arguments after max_tokens truncation: {', '.join(missing_required)}",
+                    "hint": "The model ran out of tokens while generating tool arguments. Retry with shorter, complete arguments.",
+                })
+                print(f" <- {result[:200]}", file=sys.stderr)
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                continue
+        except json.JSONDecodeError:
+            pass  # Let execute_tool handle the parse error with its own messaging
+
             result = execute_tool(fn_name, fn_args)
 
             # Show a preview of the result
@@ -688,6 +927,54 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
         if asked_human:
             print(f"\n[Blocked] Waiting for human: {human_question}", file=sys.stderr)
             return assistant_msg.get("content", "") or f"I need your input: {human_question}", STATUS_BLOCKED
+
+
+    # Check if ALL tool calls were rejected due to max_tokens truncation
+    # In this case, the errors alone won't help the LLM self-correct (it will just
+    # truncate again). Instead, consolidate the errors into a retry hint.
+    if potentially_truncated:
+        # Count how many tool results in this round contain errors
+        tool_error_count = 0
+        tool_success_count = 0
+        for tc in tool_calls:
+            tc_id = tc.get('id', '')
+            for msg in messages:
+                if msg.get('role') == 'tool' and msg.get('tool_call_id') == tc_id:
+                    if '"error"' in msg.get("content", "")[:80]:
+                        tool_error_count += 1
+                    else:
+                        tool_success_count += 1
+                    break
+
+        if tool_error_count == len(tool_calls) and tool_error_count > 0:
+            print(f"\n[Warning] All {tool_error_count} tool calls rejected due to max_tokens truncation. "
+                  f"Injecting consolidated retry hint.", file=sys.stderr)
+            # Replace all the error tool results with a single consolidated one
+            # + dummy results for remaining tool_call_ids
+            first_tc_id = tool_calls[0].get('id', '')
+            consolidated_msg = json.dumps({
+                "error": "All tool calls were truncated because the response exceeded max_tokens.",
+                "hint": "CRITICAL: You hit the token limit. To avoid this: (1) Make fewer tool calls per response. (2) Use shorter argument values. (3) Break complex operations into multiple smaller steps. (4) Retry just ONE tool call at a time.",
+                "num_truncated_calls": tool_error_count,
+            })
+
+            # Remove the individual error tool results
+            tc_ids_in_round = {tc.get('id', '') for tc in tool_calls}
+            messages[:] = [m for m in messages
+                           if not (m.get('role') == 'tool' and m.get('tool_call_id') in tc_ids_in_round)]
+            # Add one consolidated result for the first tool call
+            messages.append({
+                "role": "tool",
+                "tool_call_id": first_tc_id,
+                "content": consolidated_msg,
+            })
+            # Add dummy results for remaining tool_call_ids
+            for tc in tool_calls[1:]:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": json.dumps({"error": "Truncated \u2014 see above for retry instructions."}),
+                })
 
         # Report progress after tool execution
         if progress_callback:
