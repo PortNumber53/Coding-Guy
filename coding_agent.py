@@ -652,6 +652,22 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
             result_preview = result[:200] + ("..." if len(result) > 200 else "")
             print(f" <- {result_preview}", file=sys.stderr)
 
+            # Record tool invocation outcome for semantic search relevance refinement
+            try:
+                from tool_search_integration import get_outcome_logger
+                is_success = '"error"' not in result[:10]
+                error_type = ''
+                if not is_success:
+                    try:
+                        rdata = json.loads(result)
+                        err_msg = rdata.get('error', '')
+                        error_type = 'tool_error' if err_msg else ''
+                    except Exception:
+                        pass
+                get_outcome_logger().record(fn_name, is_success, error_type=error_type)
+            except Exception:
+                pass  # Outcome logging is best-effort, never fail the agent loop
+
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],

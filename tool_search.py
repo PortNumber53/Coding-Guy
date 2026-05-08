@@ -176,7 +176,7 @@ class SentenceTransformerBackend(EmbeddingBackend):
         try:
             from sentence_transformers import SentenceTransformer
             self._model = SentenceTransformer(self.model_name)
-            self.dim = self._model.get_sentence_embedding_dimension()
+            self.dim = self._model.get_sentence_embedding_dimension() if hasattr(self._model, 'get_embedding_dimension') is False else self._model.get_embedding_dimension()
             log_info(f"SentenceTransformer backend: model={self.model_name}, dim={self.dim}")
             return True
         except ImportError:

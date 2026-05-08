@@ -1,3 +1,14 @@
 .env
 __pycache__/
 *.pyc
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.wrangler/
+
+# Semantic search cache
+.cache/
+
+# Tool search embedding cache (optional, safe to gitignore)
+tool_embeddings/

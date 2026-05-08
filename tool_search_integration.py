@@ -501,6 +501,7 @@ def architect_handoff(task_description: str, required_capabilities: list[str],
 
     if engine is None:
         # No search engine — return static mapping using keyword search
+        from tool_search import keyword_search
         from tool_registry import get_registry
         registry = get_registry()
         tool_map = []
