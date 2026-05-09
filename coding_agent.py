@@ -279,7 +279,7 @@ def build_messages(conversation_history, user_input, docker_manager=None, sessio
 
 
 def call_llm_api(messages, api_key, invoke_url, model, stream=True,
-                session_key=None, conversation_round=-1):
+                 session_key=None, conversation_round=-1, activity_callback=None):
     """Call the Nvidia API. Returns the full response JSON (non-streamed) or
     the assembled message dict (streamed) including any tool_calls."""
     # Get pool key for tracking
@@ -404,6 +404,12 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True,
             if delta.get("content"):
                 print(delta["content"], end="", flush=True, file=sys.stderr)
                 content_parts.append(delta["content"])
+                if activity_callback:
+                    activity_callback("text_chunk", {
+                        "text": delta["content"],
+                        "round": conversation_round,
+                        "session_key": session_key or "",
+                    })
 
             # Tool call deltas
             for tc_delta in delta.get("tool_calls", []):
@@ -746,13 +752,14 @@ def _looks_truncated_string(s: str) -> bool:
 
 
 def agent_loop(user_input, conversation_history, api_key, invoke_url, model, docker_manager=None,
-               max_rounds=None, progress_callback=None, session_key=None):
+                    max_rounds=None, progress_callback=None, session_key=None, activity_callback=None):
     """Run the agent loop: call the model, execute tools, repeat until done.
 
     Returns (reply_text, status) where status is one of
     STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, or STATUS_BLOCKED.
+
+    activity_callback is used to broadcast agent activity events (e.g., to a WebSocket frontend).
     """
-    # Set task session key so task tools know which conversation they belong to
     if session_key:
         set_task_session_key(session_key)
 
@@ -761,6 +768,14 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
     assistant_msg = {}
     limiter = get_global_limiter()
 
+
+    # Notify activity listeners that the session is starting
+    if activity_callback:
+        activity_callback("session_start", {
+            "user_input": user_input[:200],
+            "session_key": session_key or "",
+            "max_rounds": effective_max,
+        })
     for round_num in range(effective_max):
         print("\nAssistant: " if round_num == 0 else "", end="", flush=True, file=sys.stderr)
 
@@ -768,7 +783,8 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
         for attempt in range(max_retries + 1):
             try:
                 assistant_msg = call_llm_api(messages, api_key, invoke_url, model, stream=True,
-                                             session_key=session_key, conversation_round=round_num)
+                                             session_key=session_key, conversation_round=round_num,
+                                          activity_callback=activity_callback)
                 break
             except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
                 is_http_error = isinstance(e, requests.exceptions.HTTPError)
@@ -817,6 +833,13 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
         # If no tool calls, the agent is done
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
+            if activity_callback:
+                activity_callback("status", {
+                    "status": STATUS_COMPLETE,
+                    "content": (assistant_msg.get("content", "") or "")[:500],
+                    "round": round_num + 1,
+                    "session_key": session_key or "",
+                })
             return assistant_msg.get("content", ""), STATUS_COMPLETE
 
         # Execute each tool call and add results
@@ -885,47 +908,74 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
         except json.JSONDecodeError:
             pass  # Let execute_tool handle the parse error with its own messaging
 
-            result = execute_tool(fn_name, fn_args)
-
-            # Show a preview of the result
-            result_preview = result[:200] + ("..." if len(result) > 200 else "")
-            print(f" <- {result_preview}", file=sys.stderr)
-
-            # Record tool invocation outcome for semantic search relevance refinement
-            try:
-                from tool_search_integration import get_outcome_logger
-                is_success = '"error"' not in result[:10]
-                error_type = ''
-                if not is_success:
-                    try:
-                        rdata = json.loads(result)
-                        err_msg = rdata.get('error', '')
-                        error_type = 'tool_error' if err_msg else ''
-                    except Exception:
-                        pass
-                get_outcome_logger().record(fn_name, is_success, error_type=error_type)
-            except Exception:
-                pass  # Outcome logging is best-effort, never fail the agent loop
-
-            messages.append({
-                "role": "tool",
+        # Activity callback for frontend
+        if activity_callback:
+            activity_callback("tool_call", {
+                "tool": fn_name,
+                "arguments": fn_args[:500],
                 "tool_call_id": tc["id"],
-                "content": result,
+                "round": round_num + 1,
+                "session_key": session_key or "",
             })
 
-            # Detect ask_human — pause the loop and return blocked status
-            if fn_name == "ask_human":
-                asked_human = True
+        result = execute_tool(fn_name, fn_args)
+
+        if activity_callback:
+            activity_callback("tool_result", {
+                "tool": fn_name,
+                "result": result[:1000],
+                "tool_call_id": tc["id"],
+                "round": round_num + 1,
+                "session_key": session_key or "",
+                "is_error": '"error"' in result[:50],
+            })
+
+        # Show a preview of the result
+        result_preview = result[:200] + ("..." if len(result) > 200 else "")
+        print(f" <- {result_preview}", file=sys.stderr)
+
+        # Record tool invocation outcome for semantic search relevance refinement
+        try:
+            from tool_search_integration import get_outcome_logger
+            is_success = '"error"' not in result[:10]
+            error_type = ''
+            if not is_success:
                 try:
-                    args = _parse_tool_args(fn_args)
-                    human_question = args.get("question", "Human input needed")
+                    rdata = json.loads(result)
+                    err_msg = rdata.get('error', '')
+                    error_type = 'tool_error' if err_msg else ''
                 except Exception:
-                    human_question = "Human input needed"
-                break
+                    pass
+            get_outcome_logger().record(fn_name, is_success, error_type=error_type)
+        except Exception:
+            pass  # Outcome logging is best-effort, never fail the agent loop
+
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc["id"],
+            "content": result,
+        })
+
+        # Detect ask_human — pause the loop and return blocked status
+        if fn_name == "ask_human":
+            asked_human = True
+            try:
+                args = _parse_tool_args(fn_args)
+                human_question = args.get("question", "Human input needed")
+            except Exception:
+                human_question = "Human input needed"
+            break
 
         # If ask_human was called, stop the loop and return blocked
         if asked_human:
             print(f"\n[Blocked] Waiting for human: {human_question}", file=sys.stderr)
+            if activity_callback:
+                activity_callback("status", {
+                    "status": STATUS_BLOCKED,
+                    "reason": "ask_human",
+                    "question": human_question,
+                    "session_key": session_key or "",
+                })
             return assistant_msg.get("content", "") or f"I need your input: {human_question}", STATUS_BLOCKED
 
 
@@ -981,16 +1031,122 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
             tool_names = [tc["function"]["name"] for tc in tool_calls]
             progress_callback(round_num + 1, effective_max, tool_names)
 
+        if activity_callback:
+            tool_names = [tc["function"]["name"] for tc in tool_calls]
+            activity_callback("round_progress", {
+                "round": round_num + 1,
+                "max_rounds": effective_max,
+                "tools_used": tool_names,
+                "session_key": session_key or "",
+            })
+
         print(file=sys.stderr)  # spacer before next model response
 
     print("\n[Reached maximum tool rounds]", file=sys.stderr)
     return assistant_msg.get("content", ""), STATUS_MAX_ROUNDS
 
 
+def check_unfinished_tasks(session_key, resume_mode):
+    """Check for unfinished tasks at startup and return (auto_input, should_resume).
+
+    Returns:
+        (auto_input, should_resume) where:
+        - auto_input: str to inject as first user input, or None
+        - should_resume: bool indicating whether to resume a task
+    """
+    from task_manager import get_task_manager, TaskManager
+    tm = get_task_manager()
+
+    # Check if there's already an active task for this session
+    active_task = tm.get_active_task(session_key)
+    if active_task and TaskManager.is_unfinished(active_task.status):
+        print(f"\n[Resume] Found active unfinished task for session '{session_key}':", file=sys.stderr)
+        print(active_task.summary(), file=sys.stderr)
+        print(file=sys.stderr)
+
+        if resume_mode == "never":
+            print("[Resume] --resume=never: skipping task resumption.", file=sys.stderr)
+            return None, False
+        elif resume_mode == "always":
+            print(f"[Resume] Auto-resuming task [{active_task.display_id}]...", file=sys.stderr)
+            return f"continue", True
+        else:  # auto
+            try:
+                choice = input("Resume this task? [Y/n] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n[Resume] Skipping.", file=sys.stderr)
+                return None, False
+            if choice in ("", "y", "yes"):
+                print(f"[Resume] Resuming task [{active_task.display_id}]...", file=sys.stderr)
+                return f"continue", True
+            else:
+                print("[Resume] Skipping task resumption.", file=sys.stderr)
+                return None, False
+
+    # No active task for this session — check for ANY unfinished tasks
+    unfinished = tm.get_unfinished_tasks()
+    if not unfinished:
+        return None, False
+
+    # Filter out any that are already the active task (handled above)
+    candidates = [t for t in unfinished if not (active_task and t.uuid == active_task.uuid)]
+    if not candidates:
+        return None, False
+
+    print(f"\n[Resume] Found {len(candidates)} unfinished task(s) from previous sessions:", file=sys.stderr)
+    for i, t in enumerate(candidates):
+        status_icon = {"pending": "\u25cb", "in_progress": "\u2026", "failed": "\u2717", "blocked": "\u2297"}.get(t.status, "?")
+        print(f"  {i+1}. [{t.display_id}] {status_icon} {t.description[:80]}", file=sys.stderr)
+        if t.error:
+            print(f"     Error: {t.error[:80]}", file=sys.stderr)
+    print(file=sys.stderr)
+
+    if resume_mode == "never":
+        print("[Resume] --resume=never: skipping task resumption.", file=sys.stderr)
+        return None, False
+    elif resume_mode == "always":
+        # Auto-resume the most recent unfinished task
+        task = candidates[0]
+        tm.set_active_task(session_key, task.uuid)
+        if task.status == "blocked" and task.blocker:
+            print(f"[Resume] Auto-resuming blocked task [{task.display_id}]...", file=sys.stderr)
+        elif task.status == "failed":
+            print(f"[Resume] Auto-resuming failed task [{task.display_id}]...", file=sys.stderr)
+        else:
+            print(f"[Resume] Auto-resuming task [{task.display_id}]...", file=sys.stderr)
+        print(task.summary(), file=sys.stderr)
+        return f"continue", True
+    else:  # auto
+        try:
+            choice = input(f"Resume a task? Enter number (1-{len(candidates)}) or 'n' to skip: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[Resume] Skipping.", file=sys.stderr)
+            return None, False
+        if choice in ("n", "no", ""):
+            print("[Resume] Skipping task resumption.", file=sys.stderr)
+            return None, False
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(candidates):
+                task = candidates[idx]
+                tm.set_active_task(session_key, task.uuid)
+                print(f"[Resume] Resuming task [{task.display_id}]...", file=sys.stderr)
+                print(task.summary(), file=sys.stderr)
+                return f"continue", True
+            else:
+                print("[Resume] Invalid selection. Skipping.", file=sys.stderr)
+                return None, False
+        except ValueError:
+            print("[Resume] Invalid input. Skipping.", file=sys.stderr)
+            return None, False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Coding agent powered by Nvidia API (Kimi K2.5)")
     parser.add_argument("--serve", action="store_true", help="Start Telegram bot webhook server")
     parser.add_argument("--slack", action="store_true", help="Start Slack bot server")
+    parser.add_argument("--ws", action="store_true", help="Start WebSocket server for frontend activity feed")
+    parser.add_argument("--ws-port", type=int, default=8765, help="WebSocket server port (default: 8765)")
     parser.add_argument(
         "--reload", action="store_true",
         help="Auto-restart the server when watched files change (use with --serve)",
@@ -1023,6 +1179,13 @@ def main():
         help="Enable verbose color-coded logging of semantic search scores",
     )
     # Rate limiting arguments
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="auto",
+        choices=["auto", "always", "never"],
+        help="Resume unfinished tasks on startup: auto (prompt if found), always (auto-resume), never (skip) (default: auto)"
+    )
     parser.add_argument(
         "--rate-limit-strategy",
         type=str,
@@ -1192,6 +1355,27 @@ def main():
             docker.cleanup()
         return
 
+    # Start WebSocket server if requested
+    if args.ws:
+        from ws_server import get_broadcaster, start_server
+        import asyncio
+        broadcaster = get_broadcaster()
+        print(f"WebSocket activity feed enabled on port {args.ws_port}", file=sys.stderr)
+
+        # Start the WS server in a background thread
+        import threading
+        def _run_ws():
+            asyncio.run(start_server(port=args.ws_port))
+        ws_thread = threading.Thread(target=_run_ws, daemon=True)
+        ws_thread.start()
+        import time; time.sleep(0.5)  # Give the WS server time to start
+
+        # Use the broadcaster's callback for the CLI loop
+        from ws_server import make_activity_callback
+        _activity_cb = make_activity_callback(broadcaster)
+    else:
+        _activity_cb = None
+
     # Print status message for the chosen API
     if args.openrouter:
         print(f"OpenRouter Coding Agent (Model: {model_name})", file=sys.stderr)
@@ -1205,13 +1389,22 @@ def main():
     print("Docker sandbox: files are isolated in a container.", file=sys.stderr)
     print("Type 'quit' to exit, 'clear' to reset conversation.\n", file=sys.stderr)
 
+    # Check for unfinished tasks to resume on startup
+    resume_input, should_resume = check_unfinished_tasks("cli", args.resume)
+
     try:
         while True:
-            try:
-                user_input = input("You: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\nGoodbye!", file=sys.stderr)
-                break
+            # If we have a resume input from startup, use it instead of prompting
+            if resume_input is not None:
+                user_input = resume_input
+                resume_input = None  # Only inject once
+                print(f"You: {user_input}", file=sys.stderr)
+            else:
+                try:
+                    user_input = input("You: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nGoodbye!", file=sys.stderr)
+                    break
 
             if not user_input:
                 continue
@@ -1231,7 +1424,7 @@ def main():
                 tm.unblock_task(active_task.uuid, user_input)
 
             reply, status = agent_loop(user_input, conversation_history, api_key, invoke_url, model_name, docker,
-                                       session_key="cli")
+                                       session_key="cli", activity_callback=_activity_cb)
 
             if status == STATUS_MAX_ROUNDS:
                 print("[Note: reached maximum tool rounds, response may be incomplete]", file=sys.stderr)

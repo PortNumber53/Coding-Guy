@@ -386,12 +386,22 @@ class TaskManager:
                 tasks.append(task)
         return sorted(tasks, key=lambda t: t.updated_at or t.created_at, reverse=True)
 
+    def get_unfinished_tasks(self) -> List[Task]:
+        """Get all tasks that are not completed (pending, in_progress, failed, blocked)."""
+        all_tasks = self.list_tasks(status=None)
+        return [t for t in all_tasks if self.is_unfinished(t.status)]
+
+    @staticmethod
+    def is_unfinished(status: str) -> bool:
+        """Check if a task status represents an unfinished state."""
+        return status in ("pending", "in_progress", "failed", "blocked")
+
     def get_resume_context(self, session_key: str) -> Optional[str]:
         """Get context string for resuming an active/blocked/failed task."""
         task = self.get_active_task(session_key)
         if not task:
             return None
-        if task.status == "completed":
+        if not self.is_unfinished(task.status):
             return None
 
         lines = [f"[RESUMING TASK]"]
