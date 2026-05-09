@@ -758,7 +758,7 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
     Returns (reply_text, status) where status is one of
     STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, or STATUS_BLOCKED.
 
-      to broadcast agent activity events (e.g., to a WebSocket frontend).
+    activity_callback is used to broadcast agent activity events (e.g., to a WebSocket frontend).
     """
     if session_key:
         set_task_session_key(session_key)

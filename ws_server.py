@@ -68,14 +68,7 @@ class ActivityBroadcaster:
     def __init__(self):
         self._clients: Set[Any] = set()
         self._history: Deque[dict] = deque(maxlen=self.MAX_HISTORY)
-        self._lock = asyncio.Lock() if asyncio.get_event_loop().is_running() else None
-
-    def _ensure_lock(self):
-        if self._lock is None:
-            try:
-                self._lock = asyncio.Lock()
-            except RuntimeError:
-                self._lock = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     @property
     def client_count(self) -> int:
@@ -107,21 +100,18 @@ class ActivityBroadcaster:
         message = json.dumps(event)
 
         if self._clients:
-            # Send to all clients, remove any that fail
-            disconnected = set()
-            for client in self._clients:
-                try:
-                    await client.send(message)
-                except Exception:
-                    disconnected.add(client)
-            self._clients -= disconnected
+            # Send to all clients concurrently, remove any that fail
+            clients = list(self._clients)
+            results = await asyncio.gather(*(c.send(message) for c in clients), return_exceptions=True)
+            for client, result in zip(clients, results):
+                if isinstance(result, Exception):
+                    self._clients.discard(client)
 
     def broadcast_sync(self, event_type: str, data: dict, meta: Optional[dict] = None):
         """Synchronous wrapper: schedules broadcast on the event loop."""
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.broadcast(event_type, data, meta))
-        except RuntimeError:
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.broadcast(event_type, data, meta), self._loop)
+        else:
             # No running loop – just add to history
             event = {
                 "type": event_type,
@@ -213,22 +203,6 @@ async def client_handler(websocket, path=None):
                         "data": {"events": history, "total": len(history)},
                         "timestamp": time.time(),
                     }))
-                elif msg_type == "submit_task":
-                    # Forward to task handler if registered
-                    _task_handler = getattr(client_handler, '_task_handler', None)
-                    if _task_handler:
-                        result = await _task_handler(msg.get("data", {}))
-                        await websocket.send(json.dumps({
-                            "type": "task_response",
-                            "data": result,
-                            "timestamp": time.time(),
-                        }))
-                    else:
-                        await websocket.send(json.dumps({
-                            "type": "error",
-                            "data": {"message": "Task submission not available"},
-                            "timestamp": time.time(),
-                        }))
 
             except json.JSONDecodeError:
                 await websocket.send(json.dumps({
@@ -245,6 +219,8 @@ async def client_handler(websocket, path=None):
 async def start_server(host: str = "0.0.0.0", port: int = 8765):
     """Start the WebSocket server."""
     print(f"WebSocket server starting on ws://{host}:{port}", file=sys.stderr)
+    broadcaster = get_broadcaster()
+    broadcaster._loop = asyncio.get_running_loop()
 
     async with serve(client_handler, host, port):
         await asyncio.Future()  # Run forever
