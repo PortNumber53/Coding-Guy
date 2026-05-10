@@ -752,13 +752,17 @@ def _looks_truncated_string(s: str) -> bool:
 
 
 def agent_loop(user_input, conversation_history, api_key, invoke_url, model, docker_manager=None,
-                    max_rounds=None, progress_callback=None, session_key=None, activity_callback=None):
+                    max_rounds=None, progress_callback=None, session_key=None, activity_callback=None,
+ tool_call_callback=None):
     """Run the agent loop: call the model, execute tools, repeat until done.
 
     Returns (reply_text, status) where status is one of
     STATUS_COMPLETE, STATUS_MAX_ROUNDS, STATUS_ERROR, or STATUS_BLOCKED.
 
     activity_callback is used to broadcast agent activity events (e.g., to a WebSocket frontend).
+    tool_call_callback is invoked after each tool execution with
+    (tool_name, tool_args_summary, result_summary, is_error) to allow real-time
+    reporting (e.g., to Telegram with emoji reactions).
     """
     if session_key:
         set_task_session_key(session_key)
@@ -928,9 +932,13 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
                 "round": round_num + 1,
                 "session_key": session_key or "",
                 "is_error": '"error"' in result[:50],
-            })
+ })
 
-        # Show a preview of the result
+ # Notify tool-call callback (e.g., Telegram reporting with reactions)
+            if tool_call_callback:
+                is_error = '"error"' in result[:50]
+                tool_call_callback(fn_name, fn_args[:200], result[:200], is_error)
+ # Show a preview of the result
         result_preview = result[:200] + ("..." if len(result) > 200 else "")
         print(f" <- {result_preview}", file=sys.stderr)
 
