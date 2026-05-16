@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "21031"))
-PROGRESS_REPORT_INTERVAL = 3 # send a progress update every N tool rounds
+PROGRESS_REPORT_INTERVAL = 1 # send a progress update every N tool rounds
 
 # GitHub webhook configuration
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
@@ -47,6 +47,9 @@ _shutdown_event: asyncio.Event = asyncio.Event()
 
 # Server start time for /status
 _start_time: float = 0.0
+
+# Progress reporting - send update every tool round for more verbose feedback
+PROGRESS_REPORT_INTERVAL = 1
 
 
 def split_message(text: str, max_len: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
@@ -587,20 +590,52 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         api_key = context.bot_data["api_key"]
         invoke_url = context.bot_data["invoke_url"]
         model = context.bot_data["model"]
-        
+
         # Get or create a session for this chat (auto-creates on first message)
         session = _memory_manager.get_or_create_session(str(chat_id), auto_create=True)
         session_key = session.uuid
-        
+
         # Use the session's history
         history = _chat_histories.setdefault(session_key, [])
 
         # Send typing indicator
         await update.effective_chat.send_action("typing")
 
-        # Build progress callback for Telegram updates
+        # Send initial working message that we'll update with progress
+        working_msg = await update.message.reply_text("🔧 Working on your request...")
+        working_msg_id = working_msg.message_id
+
+        # Build progress callback for Telegram updates that edits the same message
         loop = asyncio.get_running_loop()
-        progress_cb = make_progress_callback(update.effective_chat, loop)
+        last_update_time = [0]  # Track last update time to avoid rate limiting
+        
+        def make_edit_progress_callback():
+            def callback(round_num, max_rounds, tool_names):
+                # Rate limit progress updates to avoid hitting Telegram limits
+                import time
+                current_time = time.time()
+                if current_time - last_update_time[0] < 1.0:  # Max 1 update per second
+                    return
+                last_update_time[0] = current_time
+                
+                tools_str = ", ".join(tool_names)
+                text = f"🔧 Round {round_num}/{max_rounds}: {tools_str}"
+                
+                future = asyncio.run_coroutine_threadsafe(
+                    context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=working_msg_id,
+                        text=text
+                    ),
+                    loop
+                )
+                try:
+                    future.result(timeout=10)
+                except Exception as e:
+                    logger.warning(f"Failed to edit progress message: {e}")
+            return callback
+        
+        progress_cb = make_edit_progress_callback()
 
         # Unblock any blocked task with the user's response
         from task_manager import get_task_manager
@@ -634,11 +669,37 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
             status = STATUS_ERROR
 
         if reply is None:
-            await update.message.reply_text("Sorry, an error occurred while processing your request.")
+            # Edit the working message to show error
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=working_msg_id,
+                        text="❌ Sorry, an error occurred while processing your request."
+                    ),
+                    loop
+                )
+                future.result(timeout=10)
+            except Exception:
+                pass  # If we can't edit, just send a new message
+                await update.message.reply_text("Sorry, an error occurred while processing your request.")
             return
 
         if not reply.strip():
-            await update.message.reply_text("(No response generated.)")
+            # Edit the working message to show no response
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=working_msg_id,
+                        text="⚠️ (No response generated.)"
+                    ),
+                    loop
+                )
+                future.result(timeout=10)
+            except Exception:
+                pass  # If we can't edit, just send a new message
+                await update.message.reply_text("(No response generated.)")
             return
 
         # Append status indicator for incomplete results
@@ -654,11 +715,24 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         # Update session message count
         _memory_manager.update_session_stats(session_key, len(history))
 
-        # Send reply, prefixed with build hash and session reference, splitting if necessary
-        reply = f"[build {COMMIT_HASH}] 👤 {session.display_name}\n{reply}"
-        for chunk in split_message(reply):
-            if chunk.strip():
-                await update.message.reply_text(chunk)
+        # Edit the working message with the final result, prefixed with build hash and session reference
+        final_reply = f"[build {COMMIT_HASH}] 👤 {session.display_name}\n{reply}"
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=working_msg_id,
+                    text=final_reply
+                ),
+                loop
+            )
+            future.result(timeout=10)
+        except Exception as e:
+            logger.warning(f"Failed to edit final message, sending new one: {e}")
+            # If editing fails (e.g., message too old), send as new message
+            for chunk in split_message(final_reply):
+                if chunk.strip():
+                    await update.message.reply_text(chunk)
 
 
 # ---------------------------------------------------------------------------
