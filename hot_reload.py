@@ -2,6 +2,7 @@
 
 Monitors a directory (default: .git) for file changes and restarts the server
 subprocess automatically when changes are detected.
+
 """
 
 import os
@@ -15,17 +16,18 @@ from watchdog.events import FileSystemEventHandler
 
 
 # Debounce: ignore rapid successive changes within this window (seconds).
-DEBOUNCE_SECONDS = 2
+DEBOUNCE_SECONDS = 10
 
 
 class _ReloadHandler(FileSystemEventHandler):
     """Sets a flag when file system activity has settled."""
 
-    def __init__(self):
+    def __init__(self, watch_path: str):
         self.triggered = False
         self._last_activity = 0
         self._last_event_path: str | None = None
         self._mtimes_ns: dict[str, int] = {}
+        self.watch_path = watch_path
 
     def on_any_event(self, event):
         src_path = getattr(event, "src_path", "") or ""
@@ -56,7 +58,6 @@ class _ReloadHandler(FileSystemEventHandler):
 
         # Ignore noisy paths/files that commonly change and should not restart the server.
         ignored_parts = (
-            f"{os.sep}.git{os.sep}",
             f"{os.sep}__pycache__{os.sep}",
             f"{os.sep}.pytest_cache{os.sep}",
             f"{os.sep}.mypy_cache{os.sep}",
@@ -67,21 +68,27 @@ class _ReloadHandler(FileSystemEventHandler):
         if any(part in src_path for part in ignored_parts):
             return
 
-        ignored_substrings = (".lock", ".tmp", ".swp", ".swo")
-        if any(x in src_path for x in ignored_substrings):
-            return
-
         # Ignore environment files which can be touched by external tooling and
         # can cause restart loops.
         base = os.path.basename(src_path)
         if base == ".env" or base.startswith(".env."):
             return
 
-        # Only restart on changes that are likely to affect the running server.
-        allowed_exts = (".py", ".json", ".toml", ".yaml", ".yml")
-        _, ext = os.path.splitext(src_path)
-        if ext and ext.lower() not in allowed_exts:
-            return
+        # Ignore files with certain extensions that are not relevant.
+        # However, we allow any file in the .git directory (to catch changes like FETCH_HEAD and refs).
+        git_dir = os.path.join(self.watch_path, ".git")
+        git_dir = os.path.normpath(git_dir)
+        src_path_norm = os.path.normpath(src_path)
+        
+        if src_path_norm.startswith(git_dir):
+            # Allow changes in .git directory (regardless of extension)
+            pass
+        else:
+            # Check extension for non-.git files
+            allowed_exts = (".py", ".json", ".toml", ".yaml", ".yml")
+            _, ext = os.path.splitext(src_path_norm)
+            if ext and ext.lower() not in allowed_exts:
+                return
 
         self._last_event_path = src_path
         self._last_activity = time.monotonic()
@@ -122,7 +129,7 @@ def run_with_reload(watch_path: str, extra_args: list[str] | None = None) -> int
         print("[hot-reload] Starting server…", file=sys.stderr)
         proc = subprocess.Popen(cmd)
 
-        handler = _ReloadHandler()
+        handler = _ReloadHandler(watch_path)
         observer = Observer()
         observer.schedule(handler, watch_path, recursive=True)
         observer.start()
