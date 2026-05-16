@@ -49,7 +49,6 @@ _shutdown_event: asyncio.Event = asyncio.Event()
 _start_time: float = 0.0
 
 # Progress reporting - send update every tool round for more verbose feedback
-PROGRESS_REPORT_INTERVAL = 1
 
 
 def split_message(text: str, max_len: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
@@ -612,7 +611,6 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         def make_edit_progress_callback():
             def callback(round_num, max_rounds, tool_names):
                 # Rate limit progress updates to avoid hitting Telegram limits
-                import time
                 current_time = time.time()
                 if current_time - last_update_time[0] < 1.0:  # Max 1 update per second
                     return
@@ -621,18 +619,17 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
                 tools_str = ", ".join(tool_names)
                 text = f"🔧 Round {round_num}/{max_rounds}: {tools_str}"
                 
-                future = asyncio.run_coroutine_threadsafe(
+                # Schedule the coroutine without blocking
+                asyncio.run_coroutine_threadsafe(
                     context.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=working_msg_id,
                         text=text
                     ),
                     loop
+                ).add_done_callback(
+                    lambda f: f.exception() and logger.warning(f"Failed to edit progress message: {f.exception()}")
                 )
-                try:
-                    future.result(timeout=10)
-                except Exception as e:
-                    logger.warning(f"Failed to edit progress message: {e}")
             return callback
         
         progress_cb = make_edit_progress_callback()
@@ -671,15 +668,11 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         if reply is None:
             # Edit the working message to show error
             try:
-                future = asyncio.run_coroutine_threadsafe(
-                    context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=working_msg_id,
-                        text="❌ Sorry, an error occurred while processing your request."
-                    ),
-                    loop
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=working_msg_id,
+                    text="❌ Sorry, an error occurred while processing your request."
                 )
-                future.result(timeout=10)
             except Exception:
                 pass  # If we can't edit, just send a new message
                 await update.message.reply_text("Sorry, an error occurred while processing your request.")
@@ -688,15 +681,11 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         if not reply.strip():
             # Edit the working message to show no response
             try:
-                future = asyncio.run_coroutine_threadsafe(
-                    context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=working_msg_id,
-                        text="⚠️ (No response generated.)"
-                    ),
-                    loop
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=working_msg_id,
+                    text="⚠️ (No response generated.)"
                 )
-                future.result(timeout=10)
             except Exception:
                 pass  # If we can't edit, just send a new message
                 await update.message.reply_text("(No response generated.)")
@@ -718,15 +707,11 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         # Edit the working message with the final result, prefixed with build hash and session reference
         final_reply = f"[build {COMMIT_HASH}] 👤 {session.display_name}\n{reply}"
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=working_msg_id,
-                    text=final_reply
-                ),
-                loop
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=working_msg_id,
+                text=final_reply
             )
-            future.result(timeout=10)
         except Exception as e:
             logger.warning(f"Failed to edit final message, sending new one: {e}")
             # If editing fails (e.g., message too old), send as new message
