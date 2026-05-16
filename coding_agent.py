@@ -414,7 +414,7 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True,
             # Tool call deltas
             for tc_delta in delta.get("tool_calls", []):
                 # Validate tc_delta has required structure
-                if not isinstance(tc_delta, dict) or "index" not in tc_delta:
+                if not isinstance(tc_delta, dict) or not isinstance(tc_delta.get("index"), int):
                     print(f"[Warning] Skipping malformed tool call delta: {tc_delta}", file=sys.stderr)
                     continue
                 idx = tc_delta["index"]
