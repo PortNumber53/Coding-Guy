@@ -585,8 +585,8 @@ def make_tool_call_callback(chat, loop, bot):
         status_icon = "❌" if is_error else "✅"
         text = (
             f"{status_icon} *Tool:* `{tool_name}`\n"
-            f"📋 *Args:* {args_display}\n"
-            f"📤 *Result:* {result_display}"
+            f"📋 *Args:* `{args_display}`\n"
+            f"📤 *Result:* `{result_display}`"
         )
 
         try:
@@ -605,16 +605,12 @@ def make_tool_call_callback(chat, loop, bot):
             logger.warning(f"Failed to send tool call report: {e}")
 
     def callback(tool_name, args_summary, result_summary, is_error):
-        future = asyncio.run_coroutine_threadsafe(
+        asyncio.run_coroutine_threadsafe(
             _send_tool_report(tool_name, args_summary, result_summary, is_error),
             loop,
+        ).add_done_callback(
+            lambda f: f.exception() and logger.warning(f"Failed to schedule tool call report: {f.exception()}")
         )
-        try:
-            future.result(timeout=10)
-        except Exception as e:
-            logger.warning(f"Failed to schedule tool call report: {e}")
-
-    return callback
 
 
 async def _track_task(coro):
