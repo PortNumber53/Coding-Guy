@@ -454,6 +454,7 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True,
         message["content"] = content
     # Filter out incomplete tool calls (missing id or function name)
     complete_tool_calls = {}
+    incomplete_entries = []
     for idx, tc in tool_calls_by_index.items():
         if tc.get("id") and tc["function"].get("name"):
             # If the model hit max_tokens, mark tool calls as potentially truncated
@@ -466,12 +467,24 @@ def call_llm_api(messages, api_key, invoke_url, model, stream=True,
                 missing.append("id")
             if not tc["function"].get("name"):
                 missing.append("function name")
-            print(f"[Warning] Dropping incomplete tool call (index {idx}): missing {', '.join(missing)}", file=sys.stderr)
+            print(f"[Warning] Incomplete tool call (index {idx}): missing {', '.join(missing)} — creating synthetic error entry", file=sys.stderr)
+            # Create a synthetic entry so agent_loop doesn't return STATUS_COMPLETE
+            incomplete_entries.append({
+                "id": tc.get("id") or f"incomplete_{idx}_{int(time.time() * 1000)}",
+                "type": "function",
+                "function": {
+                    "name": "_incomplete_tool_call",
+                    "arguments": json.dumps({"missing": missing, "original_index": idx}),
+                },
+            })
 
     if complete_tool_calls:
         message["tool_calls"] = [
             complete_tool_calls[i] for i in sorted(complete_tool_calls)
         ]
+    if incomplete_entries:
+        message.setdefault("tool_calls", []).extend(incomplete_entries)
+        message["_had_incomplete_tool_calls"] = True
 
     # Store finish_reason so agent_loop can use it
     if finish_reason:
@@ -866,6 +879,26 @@ def agent_loop(user_input, conversation_history, api_key, invoke_url, model, doc
             fn_args = tc["function"].get("arguments", "")
         except (KeyError, TypeError) as e:
             print(f"\n[Warning] Malformed tool_call in response, skipping: {e}", file=sys.stderr)
+            continue
+
+        # Handle synthetic incomplete tool calls (stream was interrupted)
+        if fn_name == "_incomplete_tool_call":
+            try:
+                parsed = json.loads(fn_args)
+                missing = parsed.get("missing", ["unknown"])
+            except Exception:
+                missing = ["unknown"]
+            result = json.dumps({
+                "error": f"Tool call was interrupted by the connection/stream before it could complete.",
+                "missing_fields": missing,
+                "hint": "The previous response was cut off. Please retry the SAME tool call with complete arguments.",
+            })
+            print(f" <- {result[:200]}", file=sys.stderr)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
             continue
 
         # Check if this specific tool call was flagged as potentially truncated
