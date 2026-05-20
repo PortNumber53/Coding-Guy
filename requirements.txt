@@ -20,3 +20,4 @@ sentence-transformers>=2.2.0
 faiss-cpu>=1.7.0
 numpy>=1.24.0
 
+pika==1.2.0

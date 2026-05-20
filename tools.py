@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import shlex
+import time
 import difflib
 
 import requests
@@ -24,6 +25,13 @@ from suno_client import (
 
 from task_manager import get_task_manager
 from error_tracker import get_error_tracker
+from typing import Optional
+
+# RabbitMQ support
+try:
+    import pika
+except ImportError:
+    pika = None
 
 # MCP support
 _mcp_client = None
@@ -98,7 +106,7 @@ def write_file(path: str, content: str) -> str:
     return json.dumps({"path": path, "status": "written", "size": len(content)})
 
 
-def patch_file(path: str = "", patches: list[dict] | None = None) -> str:
+def patch_file(path: str = "", patches: Optional[list[dict]] = None) -> str:
     """Apply search-and-replace patches to a file inside the Docker container.
 
     Each patch is {"old": "text to find", "new": "replacement text"}.
@@ -187,7 +195,7 @@ def ls_file(path: str = ".") -> str:
     return json.dumps({"path": path, "entries": stdout.strip()})
 
 
-def execute_command(command: str, working_dir: str | None = None) -> str:
+def execute_command(command: str, working_dir: Optional[str] = None) -> str:
     """Execute a shell command inside the Docker container."""
     dm = _get_docker_manager()
     if working_dir:
@@ -207,7 +215,7 @@ def execute_command(command: str, working_dir: str | None = None) -> str:
     })
 
 
-def multi_read_file(paths: list[str] | None = None) -> str:
+def multi_read_file(paths: Optional[list[str]] = None) -> str:
     """Read multiple files inside the Docker container in one call."""
     if not paths:
         return json.dumps({"error": "Missing or empty required argument: paths"})
@@ -222,7 +230,7 @@ def multi_read_file(paths: list[str] | None = None) -> str:
     return json.dumps({"results": results})
 
 
-def multi_write_file(files: list[dict] | None = None) -> str:
+def multi_write_file(files: Optional[list[dict]] = None) -> str:
     """Write multiple files inside the Docker container in one call."""
     if not files:
         return json.dumps({"error": "Missing or empty required argument: files"})
@@ -287,8 +295,8 @@ def write_dockerfile(content: str) -> str:
         return json.dumps({"error": str(e)})
 
 
-def web(url: str, method: str = "GET", headers: dict | None = None,
-        body: str | None = None) -> str:
+def web(url: str, method: str = "GET", headers: Optional[dict] = None,
+        body: Optional[str] = None) -> str:
     """Make an HTTP request and return the response."""
     method = method.upper()
     try:
@@ -395,8 +403,8 @@ def browser_navigate(url: str, wait_until: str = "load", timeout: int = 60000) -
         })
 
 
-def browser_action(action: str, selector: str | None = None, text: str | None = None,
-                   key: str | None = None) -> str:
+def browser_action(action: str, selector: Optional[str] = None, text: Optional[str] = None,
+                   key: Optional[str] = None) -> str:
     """Perform an action on the current page.
     Supported actions: click, type, press, wait_for_selector, wait_for_timeout.
     """
@@ -457,7 +465,7 @@ def browser_get_content(include_images: bool = False) -> str:
         return json.dumps({"error": str(e)})
 
 
-def browser_get_elements(selector: str, attributes: list[str] | None = None) -> str:
+def browser_get_elements(selector: str, attributes: Optional[list[str]] = None) -> str:
     """Get details of elements matching a CSS selector."""
     try:
         page = _get_browser_page()
@@ -491,7 +499,7 @@ def browser_close() -> str:
 # --- Task management tools ---
 
 # Session key for task tracking (set by coding_agent.py per conversation)
-_task_session_key: str | None = None
+_task_session_key: Optional[str] = None
 
 
 def set_task_session_key(key: str):
@@ -500,7 +508,7 @@ def set_task_session_key(key: str):
     _task_session_key = key
 
 
-def create_task(description: str = "", steps: list[str] | None = None) -> str:
+def create_task(description: str = "", steps: Optional[list[str]] = None) -> str:
     """Create a tracked task with optional ordered steps."""
     if not description:
         return json.dumps({"error": "Missing required argument: description"})
@@ -517,7 +525,7 @@ def create_task(description: str = "", steps: list[str] | None = None) -> str:
 
 
 def update_task_step(task_id: str = "", step_index: int = -1, status: str = "",
-                     result: str | None = None, error: str | None = None) -> str:
+                     result: Optional[str] = None, error: Optional[str] = None) -> str:
     """Update a task step's status. Status: in_progress, completed, failed, skipped."""
     if not task_id:
         return json.dumps({"error": "Missing required argument: task_id"})
@@ -537,7 +545,7 @@ def update_task_step(task_id: str = "", step_index: int = -1, status: str = "",
     })
 
 
-def complete_task(task_id: str = "", result: str | None = None) -> str:
+def complete_task(task_id: str = "", result: Optional[str] = None) -> str:
     """Mark a task as completed with an optional result summary."""
     if not task_id:
         return json.dumps({"error": "Missing required argument: task_id"})
@@ -577,7 +585,7 @@ def ask_human(question: str = "") -> str:
     })
 
 
-def list_tasks(status: str | None = None) -> str:
+def list_tasks(status: Optional[str] = None) -> str:
     """List tracked tasks, optionally filtered by status."""
     tm = get_task_manager()
     tasks = tm.list_tasks(status=status)
@@ -596,8 +604,8 @@ def list_tasks(status: str | None = None) -> str:
 
 # --- Error tracker tools ---
 
-def list_errors(limit: int = 20, offset: int = 0, error_type: str | None = None,
-                severity: str | None = None, resolved: bool | None = None) -> str:
+def list_errors(limit: int = 20, offset: int = 0, error_type: Optional[str] = None,
+                severity: Optional[str] = None, resolved: Optional[bool] = None) -> str:
     """List tracked errors, optionally filtered by type, severity, or resolved status."""
     tracker = get_error_tracker()
     errors = tracker.get_errors(
@@ -681,7 +689,7 @@ def search_tools(query: str = "", top_k: int = 10) -> str:
         return json.dumps({"error": f"Tool search failed: {e}"})
 
 
-def search_tools_by_capability(capabilities: list[str] | None = None,
+def search_tools_by_capability(capabilities: Optional[list[str]] = None,
                                 task_description: str = "") -> str:
     """Find tools matching a list of required capabilities."""
     if not capabilities:
@@ -692,6 +700,88 @@ def search_tools_by_capability(capabilities: list[str] | None = None,
         return json.dumps(result, default=str)
     except Exception as e:
         return json.dumps({"error": f"Capability search failed: {e}"})
+
+def _get_rabbitmq_connection():
+    """Create and return a blocking RabbitMQ connection."""
+    if pika is None:
+        raise ImportError("pika is not installed. Install with: pip install pika")
+    credentials = pika.PlainCredentials(
+        os.getenv("RABBITMQ_USER", "guest"),
+        os.getenv("RABBITMQ_PASSWORD", "guest")
+    )
+    parameters = pika.ConnectionParameters(
+        host=os.getenv("RABBITMQ_HOST", "localhost"),
+        port=int(os.getenv("RABBITMQ_PORT", "5672")),
+        virtual_host=os.getenv("RABBITMQ_VHOST", "/"),
+        credentials=credentials,
+        heartbeat=60,
+        blocked_connection_timeout=300,
+    )
+    return pika.BlockingConnection(parameters)
+
+
+def rabbitmq_publish_task(task: dict, queue_name: str = "", session_key: str = "") -> str:
+    """Publish a task to a RabbitMQ queue sticky to the coding agent."""
+    if not task:
+        return json.dumps({"error": "Missing required argument: task"})
+    if not isinstance(task, dict):
+        return json.dumps({"error": "'task' must be a dictionary"})
+
+    # Determine queue name
+    if not queue_name:
+        sk = session_key or _task_session_key or ""
+        if not sk:
+            return json.dumps({"error": "Missing 'queue_name' or 'session_key' for stickiness"})
+        queue_name = f"coding_agent_tasks_{sk}"
+
+    try:
+        connection = _get_rabbitmq_connection()
+        try:
+            channel = connection.channel()
+            channel.queue_declare(queue=queue_name, durable=True, exclusive=False, auto_delete=False)
+            channel.basic_publish(
+                exchange="",
+                routing_key=queue_name,
+                body=json.dumps(task),
+                properties=pika.BasicProperties(delivery_mode=2),
+            )
+            return json.dumps({"status": "published", "queue": queue_name, "task_id": task.get("id", "unknown")})
+        finally:
+            connection.close()
+    except Exception as e:
+        return json.dumps({"error": f"Failed to publish task: {e}"})
+
+
+def rabbitmq_consume_task(timeout: int = 10, queue_name: str = "", session_key: str = "") -> str:
+    """Consume a task from the agent's sticky RabbitMQ queue."""
+    # Determine queue name
+    if not queue_name:
+        sk = session_key or _task_session_key or ""
+        if not sk:
+            return json.dumps({"error": "Missing 'queue_name' or 'session_key' for stickiness"})
+        queue_name = f"coding_agent_tasks_{sk}"
+
+    try:
+        connection = _get_rabbitmq_connection()
+        try:
+            channel = connection.channel()
+            channel.queue_declare(queue=queue_name, durable=True, exclusive=False, auto_delete=False)
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                method, properties, body = channel.basic_get(queue=queue_name, auto_ack=True)
+                if method:
+                    try:
+                        task = json.loads(body)
+                        return json.dumps({"status": "received", "task": task})
+                    except json.JSONDecodeError:
+                        return json.dumps({"error": "Received invalid JSON message"})
+                time.sleep(0.1)
+            return json.dumps({"status": "timeout"})
+        finally:
+            connection.close()
+    except Exception as e:
+        return json.dumps({"error": f"Failed to consume task: {e}"})
+
 
 # --- Tool definitions for the OpenAI-compatible tool-calling API ---
 
@@ -1495,13 +1585,63 @@ _BASE_TOOL_DEFINITIONS = [
             }
         }
     },
+
+    {
+        "function": {
+            "name": "rabbitmq_publish_task",
+            "description": "Publish a task to a RabbitMQ queue sticky to the coding agent. The task is a dictionary that will be JSON serialized. The queue name is derived from the session key for stickiness unless overridden.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "object",
+                        "description": "The task to publish (must be a dictionary)."
+                    },
+                    "queue_name": {
+                        "type": "string",
+                        "description": "Specific queue name. If not provided, uses session_key to form queue name."
+                    },
+                    "session_key": {
+                        "type": "string",
+                        "description": "Agent's session key for stickiness. If not provided, tries to get from execute_tool._session_key."
+                    }
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rabbitmq_consume_task",
+            "description": "Consume a task from the agent's sticky RabbitMQ queue. Waits for a message with a timeout.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Seconds to wait for a task (default 10)"
+                    },
+                    "queue_name": {
+                        "type": "string",
+                        "description": "Specific queue name. If not provided, uses session_key to form queue name."
+                    },
+                    "session_key": {
+                        "type": "string",
+                        "description": "Agent's session key for stickiness. If not provided, tries to get from execute_tool._session_key."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
 ]
 
 # ---------------------------------------------------------------------------
-# Argument repair — fixes common LLM mistakes before calling the handler
+# Argument repair - fixes common LLM mistakes before calling the handler
 # ---------------------------------------------------------------------------
 
-# Maps tool_name → {outer_param: list_of_inner_keys} for tools where the LLM
+# Maps tool_name -> {outer_param: list_of_inner_keys} for tools where the LLM
 # commonly flattens a nested array-of-dicts parameter into top-level keys.
 _ARGUMENT_REPAIR_MAP = {
     "patch_file": {"patches": ["old", "new"]},
@@ -1514,7 +1654,7 @@ def _repair_tool_args(tool_name: str, args: dict) -> dict:
     Currently handles:
     - patch_file: LLM sends old=..., new=... as top-level args instead of
       wrapping them in patches=[{"old": ..., "new": ...}]
-    - Type coercion: dict→list wrapping for singleton array params
+    - Type coercion: dict->list wrapping for singleton array params
     """
     import sys
     repaired = dict(args)
@@ -1610,25 +1750,30 @@ _BASE_TOOL_HANDLERS = {
  "get_error_summary": _make_handler(get_error_summary),
     "search_tools": _make_handler(search_tools),
     "search_tools_by_capability": _make_handler(search_tools_by_capability),
+    "rabbitmq_publish_task": _make_handler(rabbitmq_publish_task),
+    "rabbitmq_consume_task": _make_handler(rabbitmq_consume_task),
 }
 
 
 # Export combined definitions and handlers
+
+
 TOOL_DEFINITIONS = _BASE_TOOL_DEFINITIONS.copy()
+
 TOOL_HANDLERS = _BASE_TOOL_HANDLERS.copy()
 
 
 def refresh_mcp_tools(mcp_client=None):
     """Refresh MCP tools - called by coding_agent.py after MCP initialization.
-    
+
     This function merges MCP tools into TOOL_DEFINITIONS and TOOL_HANDLERS.
     """
-    global TOOL_DEFINITIONS, TOOL_HANDLERS, _mcp_client, _mcp_tools_loaded
-    
+    global _mcp_client, _mcp_tools_loaded
+
     if mcp_client:
         _mcp_client = mcp_client
         _mcp_tools_loaded = True
-    
+
     if not _mcp_client:
         return [], {}
     
