@@ -88,6 +88,8 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle /start command."""
     await update.message.reply_text(
         "Coding Agent ready. Send me a message and I'll help you with coding tasks.\n\n"
+        "I'll send real-time tool call reports with 👍/👎 reactions\n"
+        "so you can see what I'm doing as I work.\n\n"
         "Commands:\n"
         "/clear - Reset the conversation\n"
         "/memory - Manage memory sessions\n"
@@ -557,6 +559,60 @@ def make_progress_callback(chat, loop):
     return callback
 
 
+def make_tool_call_callback(chat, loop, bot):
+    """Return a callback that sends tool call reports to a Telegram chat
+    with 👍/👎 emoji reactions.
+
+    The callback runs in the agent_loop thread and schedules sends on the
+    bot's event loop via run_coroutine_threadsafe.
+
+    Args:
+        chat: The Telegram chat object to send messages to.
+        loop: The asyncio event loop for the bot.
+        bot: The Telegram bot instance (needed for set_message_reaction).
+
+    Returns:
+        A callable(tool_name, args_summary, result_summary, is_error) that
+        sends a Telegram message and adds a 👍 or 👎 reaction.
+    """
+
+    async def _send_tool_report(tool_name, args_summary, result_summary, is_error):
+        """Send a tool call message and add a reaction emoji."""
+        # Truncate summaries for readability
+        args_display = args_summary[:150] + ("…" if len(args_summary) > 150 else "")
+        result_display = result_summary[:150] + ("…" if len(result_summary) > 150 else "")
+
+        status_icon = "❌" if is_error else "✅"
+        text = (
+            f"{status_icon} *Tool:* `{tool_name}`\n"
+            f"📋 *Args:* `{args_display}`\n"
+            f"📤 *Result:* `{result_display}`"
+        )
+
+        try:
+            msg = await chat.send_message(text, parse_mode="Markdown")
+            # Add 👍 or 👎 reaction
+            reaction = "👎" if is_error else "👍"
+            try:
+                await bot.set_message_reaction(
+                    chat_id=chat.id,
+                    message_id=msg.message_id,
+                    reaction=[{"type": "emoji", "emoji": reaction}],
+                )
+            except Exception as react_err:
+                logger.debug(f"Could not set reaction on tool call message: {react_err}")
+        except Exception as e:
+            logger.warning(f"Failed to send tool call report: {e}")
+
+    def callback(tool_name, args_summary, result_summary, is_error):
+        asyncio.run_coroutine_threadsafe(
+            _send_tool_report(tool_name, args_summary, result_summary, is_error),
+            loop,
+        ).add_done_callback(
+            lambda f: f.exception() and logger.warning(f"Failed to schedule tool call report: {f.exception()}")
+        )
+
+
 async def _track_task(coro):
     """Track a coroutine as an active task for graceful shutdown."""
     task = asyncio.current_task()
@@ -607,7 +663,7 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
         # Build progress callback for Telegram updates that edits the same message
         loop = asyncio.get_running_loop()
         last_update_time = [0]  # Track last update time to avoid rate limiting
-        
+
         def make_edit_progress_callback():
             def callback(round_num, max_rounds, tool_names):
                 # Rate limit progress updates to avoid hitting Telegram limits
@@ -615,10 +671,10 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
                 if current_time - last_update_time[0] < 1.0:  # Max 1 update per second
                     return
                 last_update_time[0] = current_time
-                
+
                 tools_str = ", ".join(tool_names)
                 text = f"🔧 Round {round_num}/{max_rounds}: {tools_str}"
-                
+
                 # Schedule the coroutine without blocking
                 asyncio.run_coroutine_threadsafe(
                     context.bot.edit_message_text(
@@ -631,8 +687,9 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
                     lambda f: f.exception() and logger.warning(f"Failed to edit progress message: {f.exception()}")
                 )
             return callback
-        
+
         progress_cb = make_edit_progress_callback()
+        tool_call_cb = make_tool_call_callback(update.effective_chat, loop, context.bot)
 
         # Unblock any blocked task with the user's response
         from task_manager import get_task_manager
@@ -646,6 +703,7 @@ async def _handle_message_impl(update: Update, context: ContextTypes.DEFAULT_TYP
             reply, status = await asyncio.to_thread(
                 agent_loop, user_text, history, api_key, invoke_url, model,
                 progress_callback=progress_cb, session_key=session_key,
+                tool_call_callback=tool_call_cb,
             )
         except Exception as e:
             logger.error(f"Error in agent_loop for chat {chat_id}, session {session_key[:8]}: {e}", exc_info=True)
